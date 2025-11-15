@@ -42,3 +42,22 @@ rules:
     column: Email
     generator: emailUnique
 ```
+
+Each rule maps a field to a specific data generator.
+
+## Anonymization principles
+
+- Data is replaced, not removed
+- Database schema, constraints, and relationships are preserved
+- Bogus-based generators produce realistic fake data
+- Unique fields (e.g., login emails) can use dedicated unique generators
+- Intended for non-production use only
+
+## Use cases
+
+- Preparing a realistic dataset for developers
+- Creating safe test environments
+- Providing anonymized datasets to third-party contractors
+- Running performance tests, migrations, or automated QA on non-sensitive data
+- Ensuring privacy compliance for internal tools
+
