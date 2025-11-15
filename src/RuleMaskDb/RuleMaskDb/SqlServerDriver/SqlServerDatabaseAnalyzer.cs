@@ -46,6 +46,8 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
     {
         // Load columns for all tables
         var columnsByTable = new Dictionary<(string Schema, string Name), List<FieldDescription>>();
+        // Load primary key columns for fast lookup per table
+        var primaryKeysByTable = await GetPrimaryKeyColumnsByTable(connection);
         const string colsSql = @"SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
                                  FROM INFORMATION_SCHEMA.COLUMNS";
         await using var cmdCols = new SqlCommand(colsSql, connection);
@@ -64,12 +66,45 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
                 columnsByTable[key] = list;
             }
 
+            var isPk = primaryKeysByTable.TryGetValue(key, out var pkCols) && pkCols.Contains(column);
             list.Add(new FieldDescription(
                 Path: column,
-                DataType: MapSqlTypeToDateType(dataType)));
+                DataType: MapSqlTypeToDateType(dataType),
+                IsPrimaryKey: isPk));
         }
 
         return columnsByTable;
+    }
+
+    private static async Task<Dictionary<(string Schema, string Name), HashSet<string>>> GetPrimaryKeyColumnsByTable(SqlConnection connection)
+    {
+        var pkByTable = new Dictionary<(string Schema, string Name), HashSet<string>>();
+        const string sql = @"SELECT KU.TABLE_SCHEMA, KU.TABLE_NAME, KU.COLUMN_NAME
+                              FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS TC
+                              INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KU
+                                  ON TC.CONSTRAINT_NAME = KU.CONSTRAINT_NAME
+                                  AND TC.TABLE_SCHEMA = KU.TABLE_SCHEMA
+                                  AND TC.TABLE_NAME = KU.TABLE_NAME
+                              WHERE TC.CONSTRAINT_TYPE = 'PRIMARY KEY'";
+
+        await using var cmd = new SqlCommand(sql, connection);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var schema = reader.GetString(0);
+            var table = reader.GetString(1);
+            var column = reader.GetString(2);
+
+            var key = (schema, table);
+            if (!pkByTable.TryGetValue(key, out var set))
+            {
+                set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                pkByTable[key] = set;
+            }
+            set.Add(column);
+        }
+
+        return pkByTable;
     }
 
     private static async Task<List<TableDescription>> GetTableDescriptions(List<(string Schema, string Name)> tables, Dictionary<(string Schema, string Name), List<FieldDescription>> columnsByTable, SqlConnection connection)

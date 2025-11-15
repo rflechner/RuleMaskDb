@@ -2,7 +2,7 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
 
-namespace RuleMaskDb.ConsoleApp;
+namespace RuleMaskDb.ConsoleApp.AppCommands;
 
 internal class RunScriptCommand(
     IScriptDomProviderFactory scriptDomProviderFactory,

@@ -22,7 +22,7 @@ public class YamlScriptDomProviderTests
         Assert.That(spec.Database.ConnectionString, Does.Contain("Server=localhost").And.Contain("Database=ContosoRetailDW"));
 
         // Assert rules
-        Assert.That(spec.Rules.Length, Is.EqualTo(2));
+        Assert.That(spec.Rules.Length, Is.EqualTo(4));
 
         var rule1 = spec.Rules[0];
         Assert.Multiple(() =>
@@ -41,5 +41,15 @@ public class YamlScriptDomProviderTests
             Assert.That(rule2.Mask, Is.Null);
             Assert.That(rule2.Generator, Is.EqualTo(GeneratorType.Name));
         });
+        
+        var rule3 = spec.Rules[2];
+        Assert.Multiple(() =>
+        {
+            Assert.That(rule3.Table, Is.EqualTo("dbo.DimEmployee"));
+            Assert.That(rule3.Column, Is.EqualTo("FirstName"));
+            Assert.That(rule3.Mask, Is.Null);
+            Assert.That(rule3.Generator, Is.EqualTo(GeneratorType.Name));
+        });
+        
     }
 }

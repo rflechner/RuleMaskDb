@@ -1,5 +1,3 @@
-﻿using RuleMaskDb.ScriptDom;
+﻿namespace RuleMaskDb.SqlDomain;
 
-namespace RuleMaskDb.SqlDomain;
-
-public record FieldDescription(string Path, DateType DataType);
+public record FieldDescription(string Path, DateType DataType, bool IsPrimaryKey);

@@ -2,7 +2,7 @@
 using Spectre.Console;
 using Spectre.Console.Cli;
 
-namespace RuleMaskDb.ConsoleApp;
+namespace RuleMaskDb.ConsoleApp.AppCommands;
 
 internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScriptDomProviderFactory scriptDomProviderFactory, IScriptRunner scriptRunner) : AsyncCommand<DescribeDatabaseCommand.Args>
 {
@@ -45,10 +45,12 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
             {
                 var impacted = await scriptRunner.IsImpactedAsync(script, t, field, cancellationToken);
                 
+                var primaryKey = field.IsPrimaryKey ? "[green]PK[/]" : "";
+                
                 if (impacted)
-                    fieldsTexts.Add($"[{Color.Chartreuse1}]{ExtractColumnName(field.Path)}[/] [{Color.Grey54}]({field.DataType})[/]");
+                    fieldsTexts.Add($"[{Color.Chartreuse1}]{ExtractColumnName(field.Path)}[/] [{Color.Grey54}]({field.DataType})[/] {primaryKey}");
                 else
-                    fieldsTexts.Add($"{ExtractColumnName(field.Path)} [{Color.Grey54}]({field.DataType})[/]");
+                    fieldsTexts.Add($"{ExtractColumnName(field.Path)} [{Color.Grey54}]({field.DataType})[/] {primaryKey}");
             }
 
             var fieldsText = fieldsTexts.Count == 0

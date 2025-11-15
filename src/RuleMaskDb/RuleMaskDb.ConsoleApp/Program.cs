@@ -1,6 +1,7 @@
 ﻿using RuleMaskDb.SqlServerDriver;
 using Spectre.Console;
 using Microsoft.Extensions.DependencyInjection;
+using RuleMaskDb.ConsoleApp.AppCommands;
 using RuleMaskDb.ConsoleApp.DependencyInjection;
 using RuleMaskDb.ScriptDom;
 using Spectre.Console.Cli;
