@@ -1,7 +1,7 @@
 ﻿
 database:
   type: sqlserver
-  connectionString: Server=localhost\SQLEXPRESS;Database=ContosoRetailDW;Trusted_Connection=True;
+  connectionString: Server=localhost\SQLEXPRESS;Database=ContosoRetailDW;TrustServerCertificate=True;
 
 rules:
   - table: DimCustomer

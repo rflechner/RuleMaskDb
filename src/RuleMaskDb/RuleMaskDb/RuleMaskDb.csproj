@@ -8,6 +8,8 @@
 
     <ItemGroup>
       <PackageReference Include="YamlDotNet" Version="16.3.0" />
+        <PackageReference Include="Bogus" Version="35.6.5" />
+        <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
     </ItemGroup>
 
 </Project>

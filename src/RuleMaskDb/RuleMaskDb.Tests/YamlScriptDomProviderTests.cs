@@ -1,4 +1,6 @@
-﻿namespace RuleMaskDb.Tests;
+﻿using RuleMaskDb.Yaml;
+
+namespace RuleMaskDb.Tests;
 
 public class YamlScriptDomProviderTests
 {
