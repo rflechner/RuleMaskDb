@@ -11,3 +11,11 @@ rules:
   - table: dbo.DimCustomer
     column: MiddleName
     generator: Name
+
+  - table: dbo.DimEmployee
+    column: FirstName
+    generator: Name
+
+  - table: dbo.DimEmployee
+    column: EmailAddress
+    generator: Name

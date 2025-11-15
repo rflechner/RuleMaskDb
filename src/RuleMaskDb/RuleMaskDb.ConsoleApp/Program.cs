@@ -2,6 +2,7 @@
 using Spectre.Console;
 using Microsoft.Extensions.DependencyInjection;
 using RuleMaskDb.ConsoleApp.DependencyInjection;
+using RuleMaskDb.ScriptDom;
 using Spectre.Console.Cli;
 
 namespace RuleMaskDb.ConsoleApp;
@@ -26,6 +27,7 @@ class Program
         app.Configure(config =>
         {
             config.AddCommand<DescribeDatabaseCommand>("describe");
+            config.AddCommand<RunScriptCommand>("run");
         });
 
         return await app.RunAsync(args);

@@ -1,4 +1,5 @@
-﻿using Spectre.Console;
+﻿using RuleMaskDb.ScriptDom;
+using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace RuleMaskDb.ConsoleApp;
@@ -48,7 +49,6 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
                     fieldsTexts.Add($"[{Color.Chartreuse1}]{ExtractColumnName(field.Path)}[/] [{Color.Grey54}]({field.DataType})[/]");
                 else
                     fieldsTexts.Add($"{ExtractColumnName(field.Path)} [{Color.Grey54}]({field.DataType})[/]");
-                    
             }
 
             var fieldsText = fieldsTexts.Count == 0

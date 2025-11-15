@@ -1,5 +1,6 @@
 ﻿using System.Collections.Immutable;
 using Microsoft.Data.SqlClient;
+using RuleMaskDb.ScriptDom;
 
 namespace RuleMaskDb.SqlServerDriver;
 
@@ -30,13 +31,11 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
         const string tablesSql = @"SELECT TABLE_SCHEMA, TABLE_NAME
                                    FROM INFORMATION_SCHEMA.TABLES
                                    WHERE TABLE_TYPE = 'BASE TABLE'";
-        await using (var cmd = new SqlCommand(tablesSql, connection))
-        await using (var reader = await cmd.ExecuteReaderAsync())
+        await using var cmd = new SqlCommand(tablesSql, connection);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
         {
-            while (await reader.ReadAsync())
-            {
-                tables.Add((reader.GetString(0), reader.GetString(1)));
-            }
+            tables.Add((reader.GetString(0), reader.GetString(1)));
         }
 
         return tables;
@@ -92,9 +91,8 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
         return tableDescriptions;
     }
 
-    private static DateType MapSqlTypeToDateType(string sqlType)
-    {
-        return sqlType.ToLowerInvariant() switch
+    private static DateType MapSqlTypeToDateType(string sqlType) =>
+        sqlType.ToLowerInvariant() switch
         {
             "char" or "nchar" or "varchar" or "nvarchar" or "text" or "ntext" or "xml" or "uniqueidentifier" or "binary" or "varbinary"
                 or "image" => DateType.Text,
@@ -105,7 +103,6 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
             "bit" => DateType.Boolean,
             _ => DateType.Text
         };
-    }
 
     private static async Task<long> GetApproxRowCountAsync(SqlConnection connection, string schema, string table)
     {
