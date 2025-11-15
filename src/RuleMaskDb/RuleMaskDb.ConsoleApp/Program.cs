@@ -3,6 +3,7 @@ using Spectre.Console;
 using Microsoft.Extensions.DependencyInjection;
 using RuleMaskDb.ConsoleApp.AppCommands;
 using RuleMaskDb.ConsoleApp.DependencyInjection;
+using RuleMaskDb.Generators;
 using RuleMaskDb.ScriptDom;
 using Spectre.Console.Cli;
 
@@ -22,6 +23,7 @@ class Program
         services.AddSingleton<IDatabaseAnalyzer, SqlServerDatabaseAnalyzer>();
         services.AddSingleton<IScriptDomProviderFactory, ScriptDomProviderFactory>();
         services.AddSingleton<IScriptRunner, ScriptRunner>();
+        services.AddSingleton<IDataGeneratorFactory, BogusDataGeneratorFactory>();
         services.AddSingleton<DescribeDatabaseCommand>();
         
         var app = new CommandApp(new ServiceCollectionRegistar(services));
