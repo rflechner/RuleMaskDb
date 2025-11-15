@@ -1,12 +1,11 @@
 # RuleMaskDb
 
-![logo](docs/images/logo-complex-1.png)
-
-
 RuleMaskDb is a generic data anonymization engine designed to replace sensitive information directly inside a target database using a rule-based configuration file (YAML).
 It is ideal for preparing safe, realistic datasets for development, testing, QA, or integration environments.
 
 The tool is datastore-agnostic by design (currently focusing on SQL Server, with RavenDB and others planned).
+
+![logo](docs/images/logo-complex-1.png)
 
 ## Important: RuleMaskDb modifies the target database in place
 
