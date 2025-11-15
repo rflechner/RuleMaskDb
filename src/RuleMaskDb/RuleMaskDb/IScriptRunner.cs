@@ -61,11 +61,11 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer) : IScriptRunner
         
         var columnsTypes = table.Fields.ToFrozenDictionary(f => f.Path, f => f.DataType);
         
-        Dictionary<int, string> columnNames = new();
+        var columnNames = new Dictionary<int, string>();
         
         while (await reader.ReadAsync(cancellationToken))
         {
-            var fields = ArrayPool<TableRecordField>.Shared.Rent(reader.FieldCount);
+            var fields = ArrayPool<TableRecordField?>.Shared.Rent(reader.FieldCount);
 
             for (var i = 0; i < reader.FieldCount; i++)
             {
@@ -86,7 +86,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer) : IScriptRunner
             
             var anonymizedRecord = await transformRecord(record, (step, table.RowCount));
 
-            // await Task.Delay(TimeSpan.FromMilliseconds(1), cancellationToken);
+            
             
             step++;
         }
@@ -105,6 +105,6 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer) : IScriptRunner
     }
 }
 
-public record TableRecord(string DatabaseName, string TableName, TableRecordField[] Fields);
+public record TableRecord(string DatabaseName, string TableName, TableRecordField?[] Fields);
 
 public record TableRecordField(DateType DataType, string Name, object Value);
