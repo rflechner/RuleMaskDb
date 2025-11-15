@@ -22,7 +22,7 @@ public class YamlScriptDomProviderTests
         Assert.That(spec.Database.ConnectionString, Does.Contain("Server=localhost").And.Contain("Database=ContosoRetailDW"));
 
         // Assert rules
-        Assert.That(spec.Rules.Length, Is.EqualTo(4));
+        Assert.That(spec.Rules.Length, Is.EqualTo(5));
 
         var rule1 = spec.Rules[0];
         Assert.Multiple(() =>
