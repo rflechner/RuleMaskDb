@@ -1,3 +1,9 @@
 <Solution>
+  <Folder Name="/Solution/">
+    <File Path="../../LICENSE" />
+    <File Path="../../README.md" />
+  </Folder>
+  <Project Path="RuleMaskDb.ConsoleApp/RuleMaskDb.ConsoleApp.csproj" />
+  <Project Path="RuleMaskDb.Tests/RuleMaskDb.Tests.csproj" />
   <Project Path="RuleMaskDb/RuleMaskDb.csproj" />
 </Solution>

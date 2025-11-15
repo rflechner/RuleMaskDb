@@ -1,0 +1,13 @@
+﻿
+database:
+  type: sqlserver
+  connectionString: Server=localhost\SQLEXPRESS;Database=ContosoRetailDW;Trusted_Connection=True;
+
+rules:
+  - table: DimCustomer
+    column: FirstName
+    mask: '**'
+
+  - table: DimCustomer
+    column: MiddleName
+    generator: Name

@@ -1,6 +1,6 @@
 ﻿using Spectre.Console;
 
-namespace RuleMaskDb;
+namespace RuleMaskDb.ConsoleApp;
 
 class Program
 {
