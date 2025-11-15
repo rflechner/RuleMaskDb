@@ -4,10 +4,10 @@ database:
   connectionString: "Server=localhost\\SQLEXPRESS;Database=ContosoRetailDW;Integrated Security=True;TrustServerCertificate=True;"
 
 rules:
-  - table: DimCustomer
+  - table: dbo.DimCustomer
     column: FirstName
     mask: '**'
 
-  - table: DimCustomer
+  - table: dbo.DimCustomer
     column: MiddleName
     generator: Name

@@ -3,7 +3,7 @@ using Spectre.Console.Cli;
 
 namespace RuleMaskDb.ConsoleApp;
 
-internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScriptDomProviderFactory scriptDomProviderFactory) : AsyncCommand<DescribeDatabaseCommand.Args>
+internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScriptDomProviderFactory scriptDomProviderFactory, IScriptRunner scriptRunner) : AsyncCommand<DescribeDatabaseCommand.Args>
 {
     internal class Args : CommandSettings
     {
@@ -23,7 +23,7 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
     {
         var scriptDomProvider = await scriptDomProviderFactory.CreateAsync(new Uri(settings.ScriptPath!));
         var script = await scriptDomProvider.LoadScriptAsync();
-
+        
         var databaseDescription = await databaseAnalyzer.DescribeDatabaseAsync(new DatabaseSpecification(script.Database.DatabaseType, script.Database.ConnectionString));
 
         var table = new Table()
@@ -38,10 +38,22 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
 
         foreach (var t in databaseDescription.Tables.OrderBy(t => t.Name))
         {
-            var fieldsText = t.Fields.Length == 0
-                ? "-"
-                : string.Join('\n', t.Fields.Select(f => $"{ExtractColumnName(f.Path)} [grey]({f.DataType})[/]"));
+            var fieldsTexts = new List<string>();
 
+            foreach (var field in t.Fields)
+            {
+                var impacted = await scriptRunner.IsImpactedAsync(script, t, field, cancellationToken);
+                
+                if (impacted)
+                    fieldsTexts.Add($"[{Color.Chartreuse1}]{ExtractColumnName(field.Path)}[/] [{Color.Grey54}]({field.DataType})[/]");
+                else
+                    fieldsTexts.Add($"{ExtractColumnName(field.Path)} [{Color.Grey54}]({field.DataType})[/]");
+                    
+            }
+
+            var fieldsText = fieldsTexts.Count == 0
+                ? "-"
+                : string.Join('\n', fieldsTexts);
             table.AddRow(
                 new Markup($"[cyan]{t.Name}[/]"),
                 new Markup(t.RowCount.ToString("N0")),

@@ -26,11 +26,6 @@ public interface IScriptDomProvider
     Task<ScriptSpecification> LoadScriptAsync();
 }
 
-public interface IScriptRunner
-{
-    Task RunAsync(ScriptSpecification scriptSpecification, CancellationToken cancellationToken = default);
-}
-
 public record DatabaseDescription(string Name, ImmutableArray<TableDescription> Tables);
 
 public record TableDescription(string Name, int RowCount, ImmutableArray<FieldDescription> Fields);

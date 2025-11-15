@@ -26,7 +26,7 @@ public class YamlScriptDomProviderTests
         var rule1 = spec.Rules[0];
         Assert.Multiple(() =>
         {
-            Assert.That(rule1.Table, Is.EqualTo("DimCustomer"));
+            Assert.That(rule1.Table, Is.EqualTo("dbo.DimCustomer"));
             Assert.That(rule1.Column, Is.EqualTo("FirstName"));
             Assert.That(rule1.Mask, Is.EqualTo("**"));
             Assert.That(rule1.Generator, Is.Null);
@@ -35,7 +35,7 @@ public class YamlScriptDomProviderTests
         var rule2 = spec.Rules[1];
         Assert.Multiple(() =>
         {
-            Assert.That(rule2.Table, Is.EqualTo("DimCustomer"));
+            Assert.That(rule2.Table, Is.EqualTo("dbo.DimCustomer"));
             Assert.That(rule2.Column, Is.EqualTo("MiddleName"));
             Assert.That(rule2.Mask, Is.Null);
             Assert.That(rule2.Generator, Is.EqualTo(GeneratorType.Name));

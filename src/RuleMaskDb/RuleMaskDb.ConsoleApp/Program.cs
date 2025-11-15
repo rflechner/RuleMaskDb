@@ -2,7 +2,6 @@
 using Spectre.Console;
 using Microsoft.Extensions.DependencyInjection;
 using RuleMaskDb.ConsoleApp.DependencyInjection;
-using RuleMaskDb.Yaml;
 using Spectre.Console.Cli;
 
 namespace RuleMaskDb.ConsoleApp;
@@ -20,6 +19,7 @@ class Program
         var services = new ServiceCollection();
         services.AddSingleton<IDatabaseAnalyzer, SqlServerDatabaseAnalyzer>();
         services.AddSingleton<IScriptDomProviderFactory, ScriptDomProviderFactory>();
+        services.AddSingleton<IScriptRunner, ScriptRunner>();
         services.AddSingleton<DescribeDatabaseCommand>();
         
         var app = new CommandApp(new ServiceCollectionRegistar(services));

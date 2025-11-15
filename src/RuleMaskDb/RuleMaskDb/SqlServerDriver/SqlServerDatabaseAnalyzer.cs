@@ -65,7 +65,7 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
             }
 
             list.Add(new FieldDescription(
-                Path: $"{schema}.{table}.{column}",
+                Path: column,
                 DataType: MapSqlTypeToDateType(dataType)));
         }
 
