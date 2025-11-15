@@ -1,6 +1,7 @@
 ﻿using System.Collections.Immutable;
 using Microsoft.Data.SqlClient;
 using RuleMaskDb.ScriptDom;
+using RuleMaskDb.SqlDomain;
 
 namespace RuleMaskDb.SqlServerDriver;
 

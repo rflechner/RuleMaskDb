@@ -1,4 +1,4 @@
-﻿namespace RuleMaskDb;
+﻿namespace RuleMaskDb.ScriptDom;
 
 public enum GeneratorType
 {

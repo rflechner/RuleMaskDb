@@ -1,8 +1,8 @@
 ﻿using System.Buffers;
 using System.Collections.Frozen;
-using System.Collections.Immutable;
 using Microsoft.Data.SqlClient;
 using RuleMaskDb.ScriptDom;
+using RuleMaskDb.SqlDomain;
 
 namespace RuleMaskDb;
 
@@ -85,7 +85,6 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer) : IScriptRunner
             var record = new TableRecord(database.Name, table.Name, fields);
             
             var anonymizedRecord = await transformRecord(record, (step, table.RowCount));
-
             
             
             step++;

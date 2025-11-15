@@ -1,4 +1,4 @@
-﻿namespace RuleMaskDb.ScriptDom;
+﻿namespace RuleMaskDb;
 
 public enum DateType
 {

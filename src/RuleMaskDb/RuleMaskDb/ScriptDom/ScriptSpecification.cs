@@ -1,5 +1,5 @@
 ﻿using System.Collections.Immutable;
 
-namespace RuleMaskDb;
+namespace RuleMaskDb.ScriptDom;
 
 public record ScriptSpecification(DatabaseSpecification Database, ImmutableArray<Rule> Rules);
