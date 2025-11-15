@@ -19,3 +19,7 @@ rules:
   - table: dbo.DimEmployee
     column: EmailAddress
     generator: Name
+
+  - table: dbo.DimCustomer
+    column: EmailAddress
+    generator: Email

@@ -12,4 +12,4 @@ public interface IScriptRunner
 
 public record TableRecord(string DatabaseName, string TableName, TableRecordField?[] Fields);
 
-public record TableRecordField(DateType DataType, string Name, object Value);
+public record TableRecordField(DateType DataType, string Name, object? Value);
