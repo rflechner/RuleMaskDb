@@ -63,3 +63,9 @@ Each rule maps a field to a specific data generator.
 - Running performance tests, migrations, or automated QA on non-sensitive data
 - Ensuring privacy compliance for internal tools
 
+
+## Sample databases
+
+- SQL Server: Consto https://www.microsoft.com/en-us/download/details.aspx?id=54427
+- PostgreSQL: Pagila https://github.com/devrimgunduz/pagila
+- 

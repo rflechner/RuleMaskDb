@@ -3,6 +3,10 @@
     <File Path="../../LICENSE" />
     <File Path="../../README.md" />
   </Folder>
+  <Folder Name="/Solution/DockerFiles/" />
+  <Folder Name="/Solution/DockerFiles/postgresql/">
+    <File Path="dockerfiles\postgresql\Dockerfile" />
+  </Folder>
   <Project Path="RuleMaskDb.ConsoleApp/RuleMaskDb.ConsoleApp.csproj" />
   <Project Path="RuleMaskDb.Tests/RuleMaskDb.Tests.csproj" />
   <Project Path="RuleMaskDb/RuleMaskDb.csproj" />
