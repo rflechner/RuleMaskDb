@@ -35,7 +35,6 @@
 
 # docker run -d --name rulemaskdb-postgres -p 5432:5432 -e POSTGRES_USER=rulemask -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=rulemaskdb -v rulemaskdb_pg_data:/var/lib/postgresql/data postgres:latest
 # jdbc:postgresql://localhost:5432/postgres?user=rulemask&password=secret
-# jdbc:postgresql://localhost:5432/dvdrental?user=rulemask&password=secret
 
 # Version de Postgres paramétrable
 ARG POSTGRES_VERSION=16

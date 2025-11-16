@@ -68,4 +68,16 @@ Each rule maps a field to a specific data generator.
 
 - SQL Server: Consto https://www.microsoft.com/en-us/download/details.aspx?id=54427
 - PostgreSQL: Pagila https://github.com/devrimgunduz/pagila
-- 
+
+### Run PostreSQL
+
+```shell
+docker run --name postgres -p 5432:5432 -e POSTGRES_USER=rulemask -e POSTGRES_PASSWORD=secret -d postgres
+```
+
+
+```shell
+docker exec -it postgres psql -U postgres
+```
+
+
