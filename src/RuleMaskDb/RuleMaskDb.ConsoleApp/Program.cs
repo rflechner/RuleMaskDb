@@ -1,4 +1,4 @@
-﻿using RuleMaskDb.SqlServerDriver;
+using RuleMaskDb.SqlServerDriver;
 using Spectre.Console;
 using Microsoft.Extensions.DependencyInjection;
 using RuleMaskDb.ConsoleApp.AppCommands;
@@ -20,7 +20,7 @@ class Program
         });
         
         var services = new ServiceCollection();
-        services.AddSingleton<IDatabaseAnalyzer, SqlServerDatabaseAnalyzer>();
+        services.AddSingleton<IDatabaseAnalyzer, DatabaseAnalyzer>();
         services.AddSingleton<IScriptDomProviderFactory, ScriptDomProviderFactory>();
         services.AddSingleton<IScriptRunner, ScriptRunner>();
         services.AddSingleton<IDataGeneratorFactory, BogusDataGeneratorFactory>();

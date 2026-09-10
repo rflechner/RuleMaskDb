@@ -1,4 +1,4 @@
-﻿using System.Collections.Immutable;
+using System.Collections.Immutable;
 using RuleMaskDb.ScriptDom;
 
 namespace RuleMaskDb.Yaml;
@@ -19,11 +19,10 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         // Deserialize into internal DTOs matching the YAML schema
         var doc = deserializer.Deserialize<YamlScript>(yaml) ?? new YamlScript();
 
-        // Map database type
-        var dbType = Enum.TryParse<DatabaseType>(doc.Database?.Type ?? string.Empty, true, out var parsedDbType)
-            ? parsedDbType
-            : DatabaseType.SqlServer; // default to SqlServer if unspecified/unknown
-
+        // Preserve the default only when type is omitted; reject mistyped providers.
+        var typeName = doc.Database?.Type ?? nameof(DatabaseType.SqlServer);
+        if (!Enum.TryParse<DatabaseType>(typeName, true, out var dbType) || !Enum.IsDefined(dbType))
+            throw new InvalidOperationException($"Unknown database type: {typeName}");
         var database = new DatabaseSpecification(dbType, doc.Database?.ConnectionString ?? string.Empty);
 
         // Map rules

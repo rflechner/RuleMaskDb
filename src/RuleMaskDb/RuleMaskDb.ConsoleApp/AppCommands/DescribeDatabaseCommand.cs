@@ -1,4 +1,4 @@
-﻿using RuleMaskDb.ScriptDom;
+using RuleMaskDb.ScriptDom;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -28,7 +28,7 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
         var databaseDescription = await databaseAnalyzer.DescribeDatabaseAsync(new DatabaseSpecification(script.Database.DatabaseType, script.Database.ConnectionString));
 
         var table = new Table()
-            .Title($"Database [bold yellow]{databaseDescription.Name}[/]")
+            .Title($"Database [bold yellow]{Markup.Escape(databaseDescription.Name)}[/]")
             .Centered()
             .Border(TableBorder.Rounded)
             .BorderColor(Color.Grey54);
@@ -48,29 +48,21 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
                 var primaryKey = field.IsPrimaryKey ? "[green]PK[/]" : "";
                 
                 if (impacted)
-                    fieldsTexts.Add($"[{Color.Chartreuse1}]{ExtractColumnName(field.Path)}[/] [{Color.Grey54}]({field.DataType})[/] {primaryKey}");
+                    fieldsTexts.Add($"[{Color.Chartreuse1}]{Markup.Escape(field.Path)}[/] [{Color.Grey54}]({field.DataType})[/] {primaryKey}");
                 else
-                    fieldsTexts.Add($"{ExtractColumnName(field.Path)} [{Color.Grey54}]({field.DataType})[/] {primaryKey}");
+                    fieldsTexts.Add($"{Markup.Escape(field.Path)} [{Color.Grey54}]({field.DataType})[/] {primaryKey}");
             }
 
             var fieldsText = fieldsTexts.Count == 0
                 ? "-"
                 : string.Join('\n', fieldsTexts);
             table.AddRow(
-                new Markup($"[cyan]{t.Name}[/]"),
+                new Markup($"[cyan]{Markup.Escape(t.Name)}[/]"),
                 new Markup(t.RowCount.ToString("N0")),
                 new Markup(fieldsText));
         }
 
         AnsiConsole.Write(table);
-
-        static string ExtractColumnName(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return path;
-            var idx = path.LastIndexOf('.')
-                ;
-            return idx >= 0 && idx < path.Length - 1 ? path[(idx + 1)..] : path;
-        }
 
         return 0;
     }

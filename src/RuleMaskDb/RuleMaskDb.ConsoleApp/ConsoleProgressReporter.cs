@@ -1,4 +1,4 @@
-﻿using Spectre.Console;
+using Spectre.Console;
 
 namespace RuleMaskDb.ConsoleApp;
 
@@ -9,7 +9,7 @@ public class ConsoleProgressReporter(ProgressContext context) : IProgressReporte
 
     public Task ReportProgressAsync(string tableName, int step, int totalStepCount, CancellationToken cancellationToken = default)
     {
-        var lastStep = totalStepCount-1;
+        var lastStep = Math.Max(1, totalStepCount);
         
         if (_currentTable != tableName)
         {
@@ -20,7 +20,7 @@ public class ConsoleProgressReporter(ProgressContext context) : IProgressReporte
             }
             
             _currentTable = tableName;
-            _task = context.AddTask($"[{Color.Wheat1}]{tableName}[/]").MaxValue(lastStep);
+            _task = context.AddTask($"[{Color.Wheat1}]{Markup.Escape(tableName)}[/]").MaxValue(lastStep);
         }
         
         _task = _task?.Value(step);
