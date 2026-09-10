@@ -1,0 +1,13 @@
+database:
+  type: SqlServer
+  connectionString: 'Server=sqlserver;Database=rulemask_e2e;User Id=sa;Password=RuleMask_E2e_Only!42;TrustServerCertificate=True'
+rules:
+  - table: dbo.people
+    column: first_name
+    generator: FirstName
+  - table: dbo.people
+    column: email
+    generator: Email
+  - table: dbo.people
+    column: age
+    generator: Age

@@ -418,3 +418,6 @@ FodyWeavers.xsd
 *.msp
 
 src/RuleMaskDb/.idea/
+
+# Integration artifacts
+tests/integration/reports/

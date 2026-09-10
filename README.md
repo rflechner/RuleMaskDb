@@ -1,5 +1,7 @@
 # RuleMaskDb
 
+> **Experimental project:** RuleMaskDb is still experimental. Features and configuration may change.
+
 RuleMaskDb replaces configured sensitive fields directly in a target database using YAML rules and Bogus generators. SQL Server and PostgreSQL are supported; RavenDB is reserved but not implemented. Requires .NET 10.
 
 ![RuleMaskDb](docs/images/logo-complex-1.png)
@@ -90,3 +92,7 @@ docker rm --force --volumes rulemask-engine-test
 - PostgreSQL: [Pagila](https://github.com/devrimgunduz/pagila)
 
 Restore a separate copy before applying any anonymization rules.
+
+## Docker integration tests
+
+See [the integration harness](tests/integration/README.md) to run the real console against SQL Server and PostgreSQL with database assertions and HTML reports served by Nginx.

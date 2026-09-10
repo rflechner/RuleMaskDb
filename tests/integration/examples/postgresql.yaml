@@ -1,0 +1,13 @@
+database:
+  type: PostgreSQL
+  connectionString: 'Host=postgres;Database=rulemask_e2e;Username=postgres;Password=RuleMask_E2e_Only!42'
+rules:
+  - table: public.people
+    column: first_name
+    generator: FirstName
+  - table: public.people
+    column: email
+    generator: Email
+  - table: public.people
+    column: age
+    generator: Age
