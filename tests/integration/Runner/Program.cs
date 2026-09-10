@@ -128,13 +128,19 @@ static async Task<List<string?[]>> Read(DbConnection db, string sql)
 void WriteReport()
 {
     string Enc(string? value) => WebUtility.HtmlEncode(value) ?? string.Empty;
+    // Keep textual labels alongside symbols so status never depends on color alone.
+    string Badge(string state) => $"<span class='status {state.ToLowerInvariant()}'><span aria-hidden='true'>{(state == "PASS" ? "&#10003;" : state == "FAIL" ? "&#10007;" : "&#8230;")}</span> {state}</span>";
     bool passed = results.All(r => r.Passed);
     string status = results.Select(r => r.Engine).Distinct().Count() < engines.Length ? "RUNNING" : passed ? "PASS" : "FAIL";
-    var html = new StringBuilder($"<!doctype html><html lang='en'><meta charset='utf-8'><title>RuleMaskDb {status}</title><style>body{{font:16px system-ui;max-width:1100px;margin:40px auto}}table{{border-collapse:collapse;width:100%}}td,th{{padding:8px;border:1px solid #ccc;text-align:left}}.fail{{background:#ffdada}}pre{{white-space:pre-wrap}}</style><h1>RuleMaskDb integration: {status}</h1><p>Started {started:O}; updated {DateTimeOffset.UtcNow:O}. {results.Count(r => r.Passed)}/{results.Count} checks passed.</p>");
+    var html = new StringBuilder($"<!doctype html><html lang='en'><meta charset='utf-8'><title>RuleMaskDb {status}</title><style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 16px}}table{{border-collapse:collapse;width:100%}}td,th{{padding:8px;border:1px solid #ccc;text-align:left}}tr.fail{{background:#fff0f0}}.status{{display:inline-block;font-weight:700;white-space:nowrap;padding:2px 8px;border-radius:5px}}.status.pass{{color:#146c2e;background:#e8f5ec}}.status.fail{{color:#a11616;background:#ffe3e3}}.status.running{{color:#624900;background:#fff4cc}}pre{{white-space:pre-wrap}}</style><h1>RuleMaskDb integration: {Badge(status)}</h1><p>Started {started:O}; updated {DateTimeOffset.UtcNow:O}. <strong>{results.Count(r => r.Passed)}/{results.Count} checks passed; {results.Count(r => !r.Passed)} failed.</strong></p>");
     foreach (var engine in engines)
-        html.Append($"<p>{engine}: <a href='{engine}-console.log'>Console log</a> · <a href='{engine}-before.json'>Before</a> · <a href='{engine}-after.json'>After</a></p>");
+    {
+        var checks = results.Where(r => r.Engine == engine).ToArray();
+        string engineStatus = checks.Length == 0 ? "RUNNING" : checks.All(r => r.Passed) ? "PASS" : "FAIL";
+        html.Append($"<p><strong>{engine}</strong> {Badge(engineStatus)} — {checks.Count(r => r.Passed)}/{checks.Length} passed; {checks.Count(r => !r.Passed)} failed. <a href='{engine}-console.log'>Console log</a> · <a href='{engine}-before.json'>Before</a> · <a href='{engine}-after.json'>After</a></p>");
+    }
     html.Append("<table><tr><th>Engine</th><th>Assertion</th><th>Result</th><th>Details</th></tr>");
-    foreach (var r in results) html.Append($"<tr class='{(r.Passed ? "pass" : "fail")}'><td>{Enc(r.Engine)}</td><td>{Enc(r.Name)}</td><td>{(r.Passed ? "PASS" : "FAIL")}</td><td><pre>{Enc(r.Detail)}</pre></td></tr>");
+    foreach (var r in results) html.Append($"<tr class='{(r.Passed ? "pass" : "fail")}'><td>{Enc(r.Engine)}</td><td>{Enc(r.Name)}</td><td>{Badge(r.Passed ? "PASS" : "FAIL")}</td><td><pre>{Enc(r.Detail)}</pre></td></tr>");
     html.Append("</table></html>");
     File.WriteAllText(Path.Combine(reportDir, "index.html.tmp"), html.ToString());
     File.Move(Path.Combine(reportDir, "index.html.tmp"), Path.Combine(reportDir, "index.html"), true);

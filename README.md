@@ -95,4 +95,37 @@ Restore a separate copy before applying any anonymization rules.
 
 ## Docker integration tests
 
-See [the integration harness](tests/integration/README.md) to run the real console against SQL Server and PostgreSQL with database assertions and HTML reports served by Nginx.
+Prerequisites: Docker running Linux containers, Docker Compose v2, and PowerShell
+(PowerShell on Windows or `pwsh` on Linux/macOS). SQL Server requires a compatible
+x86-64 host; allocate at least 4 GB of memory to Docker.
+
+From the repository root, run:
+
+```powershell
+./tests/integration/run.ps1
+```
+
+The script builds the console and runner, starts SQL Server and PostgreSQL with
+Docker Compose, seeds synthetic data, and checks database values before and after
+anonymization. It returns 0 on success and a nonzero code on failure.
+
+Open the [Nginx report](http://localhost:8088). Green check marks with PASS and red
+crosses with FAIL identify each test result and summarize each engine. Reports
+and console logs are also saved under `tests/integration/reports/`. Nginx stays
+available after the runner finishes, including when tests fail.
+
+Run the same command again to recreate the fixtures. To also recreate the test
+database volumes, use:
+
+```powershell
+./tests/integration/run.ps1 -Reset
+```
+
+Stop the services and remove the test database volumes:
+
+```powershell
+docker compose -f tests/integration/compose.yaml --profile report down --volumes --remove-orphans
+```
+
+See [the integration harness documentation](tests/integration/README.md) for
+assertions, negative controls, port configuration, and validated results.
