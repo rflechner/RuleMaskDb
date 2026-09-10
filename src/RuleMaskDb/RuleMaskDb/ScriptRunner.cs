@@ -1,6 +1,4 @@
-﻿using System.Buffers;
-using System.Collections.Frozen;
-using Microsoft.Data.SqlClient;
+using System.Data.Common;
 using RuleMaskDb.Generators;
 using RuleMaskDb.ScriptDom;
 using RuleMaskDb.SqlDomain;
@@ -11,186 +9,71 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
 {
     public async Task RunAsync(ScriptSpecification script, IProgressReporter progressReporter, CancellationToken cancellationToken = default)
     {
-        var database = await databaseAnalyzer.DescribeDatabaseAsync(new DatabaseSpecification(script.Database.DatabaseType, script.Database.ConnectionString));
-
-        var impactedTablesNames =
-            script.Rules
-                .GroupBy(r => r.Table)
-                .ToFrozenDictionary(
-                    g => g.Key, 
-                    g => new
-                    {
-                        ColumnsNames = g.Select(r => r.Column).ToFrozenSet(),
-                        ColumnsRules = g.ToFrozenDictionary(r => r.Column, r => new
-                        {
-                            Rule = r,
-                            Generator = dataGeneratorFactory.Create(r.Generator ?? GeneratorType.Name)
-                        })
-                    }
-                );
-
-        foreach (var table in database.Tables)
+        cancellationToken.ThrowIfCancellationRequested();
+        var driver = new RelationalDriver(script.Database.DatabaseType);
+        var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
+        var plans = new List<(TableDescription Table, Rule[] Rules)>();
+        // Validate every target before making the first change.
+        foreach (var group in script.Rules.GroupBy(r => r.Table))
         {
-            if (!impactedTablesNames.TryGetValue(table.Name, out var tableRules)) continue;
-            
-            await StreamRecords(script.Database.ConnectionString, database, table, tableRules.ColumnsNames, async (record, progress) =>
+            var matches = database.Tables.Where(t => t.Name == group.Key).ToArray();
+            if (matches.Length != 1) throw new InvalidOperationException($"Table target is missing or ambiguous: {group.Key}");
+            var table = matches[0];
+            var rules = group.ToArray();
+            if (rules.Select(r => r.Column).Distinct().Count() != rules.Length)
+                throw new InvalidOperationException($"Duplicate column rules for {table.Name}");
+            foreach (var rule in rules)
             {
-                await progressReporter.ReportProgressAsync(table.Name, progress.step, progress.totalSteps, cancellationToken);
-
-                var anonymizedFields = ArrayPool<TableRecordField?>.Shared.Rent(record.Fields.Length);
-
-                for (var i = 0; i < record.Fields.Length; i++)
-                {
-                    var field = record.Fields[i];
-                    // fields are populated by an array pool, so we need to check if the field is null
-                    if (field == null) continue;
-
-                    if (!tableRules.ColumnsRules.TryGetValue(field.Name, out var rule)) continue;
-
-                    var value = await rule.Generator.GenerateValueAsync(cancellationToken);
-                    anonymizedFields[i] = field with { Value = value };
-                }
-
-                return record with { Fields = anonymizedFields };
-            }, cancellationToken);
-        }
-    }
-
-    private static async Task<SqlConnection> CreateSqlConnection(string connectionString, CancellationToken cancellationToken)
-    {
-        SqlConnection? connection = null;
-        try
-        {
-            connection = new SqlConnection(connectionString);
-            await connection.OpenAsync(cancellationToken);
-            return connection;
-        }
-        catch
-        {
-            if (connection != null) await connection.DisposeAsync();
-            throw;
-        }
-    }
-
-    private async Task StreamRecords(
-        string connectionString,
-        DatabaseDescription database, 
-        TableDescription table, 
-        FrozenSet<string> rulesFields,
-        Func<TableRecord, (int step, int totalSteps), Task<TableRecord>> transformRecord, 
-        CancellationToken cancellationToken = default)
-    {
-        if (!rulesFields.Any()) return;
-        
-        await using var readerConnection = await CreateSqlConnection(connectionString, cancellationToken);
-        await using var updaterConnection = await CreateSqlConnection(connectionString, cancellationToken);
-        
-        // also fetch primary keys so we can build the WHERE clause for updates
-        var pkFields = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
-        var selectedFields = rulesFields.Concat(pkFields).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var sqlFields = string.Join(", ", selectedFields.Select(f => $"[{f}]"));
-
-        var tablesSql = $"SELECT {sqlFields} FROM {table.Name}";
-        await using var cmd = new SqlCommand(tablesSql, readerConnection);
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        
-        var step = 0;
-        
-        var columnsTypes = table.Fields.ToFrozenDictionary(f => f.Path, f => f.DataType);
-        var pkSet = new HashSet<string>(pkFields, StringComparer.OrdinalIgnoreCase);
-        
-        var columnNames = new Dictionary<int, string>();
-        
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            var fields = ArrayPool<TableRecordField?>.Shared.Rent(reader.FieldCount);
-
-            for (var i = 0; i < reader.FieldCount; i++)
-            {
-                var value = await reader.IsDBNullAsync(i, cancellationToken)
-                    ? null
-                    : reader.GetValue(i);
-            
-                if (!columnNames.TryGetValue(i, out var colName)) 
-                    columnNames[i] = colName = reader.GetName(i);
-                
-                var dataType = columnsTypes[colName];
-            
-                var recordField = new TableRecordField(dataType, colName, value!);
-                fields[i] = recordField;
+                var field = table.Fields.SingleOrDefault(f => f.Path == rule.Column)
+                    ?? throw new InvalidOperationException($"Unknown column: {table.Name}.{rule.Column}");
+                if (field.IsPrimaryKey) throw new InvalidOperationException($"Cannot anonymize primary key: {table.Name}.{field.Path}");
             }
-
-            var record = new TableRecord(database.Name, table.Name, fields);
-            
-            var anonymizedRecord = await transformRecord(record, (step, table.RowCount));
-
-            await UpdateRecordAsync(updaterConnection, table, record, anonymizedRecord, pkSet, cancellationToken);
-
-            step++;
+            if (!table.Fields.Any(f => f.IsPrimaryKey))
+                throw new InvalidOperationException($"Table has no primary key: {table.Name}");
+            plans.Add((table, rules));
+        }
+        foreach (var (table, rules) in plans)
+        {
+            await using var readerConnection = driver.CreateConnection(script.Database.ConnectionString);
+            await using var updaterConnection = driver.CreateConnection(script.Database.ConnectionString);
+            await readerConnection.OpenAsync(cancellationToken);
+            await updaterConnection.OpenAsync(cancellationToken);
+            // PostgreSQL MVCC allows a streaming reader alongside a table transaction.
+            // Preserve SQL Server autocommit to avoid updater lock escalation blocking the reader.
+            await using var transaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
+                ? await updaterConnection.BeginTransactionAsync(cancellationToken) : null;
+            var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
+            var generators = rules.Select(r => dataGeneratorFactory.Create(r.Generator ?? GeneratorType.Name)).ToArray();
+            await using var select = readerConnection.CreateCommand();
+            select.CommandText = $"SELECT {string.Join(", ", keys.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            var step = 0;
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                await using var update = updaterConnection.CreateCommand();
+                update.Transaction = transaction;
+                var assignments = rules.Select((r, i) => $"{driver.QuoteIdentifier(r.Column)} = @set{i}");
+                var predicates = keys.Select((key, i) => $"{driver.QuoteIdentifier(key)} = @pk{i}");
+                update.CommandText = $"UPDATE {driver.QuoteTable(table)} SET {string.Join(", ", assignments)} WHERE {string.Join(" AND ", predicates)}";
+                for (var i = 0; i < generators.Length; i++)
+                    AddParameter(update, $"set{i}", await generators[i].GenerateValueAsync(cancellationToken));
+                for (var i = 0; i < keys.Length; i++) AddParameter(update, $"pk{i}", reader.GetValue(i));
+                var affected = await update.ExecuteNonQueryAsync(cancellationToken);
+                if (affected != 1) throw new InvalidOperationException($"Expected one updated row in {table.Name}, got {affected}.");
+                await progressReporter.ReportProgressAsync(table.Name, ++step, table.RowCount, cancellationToken);
+            }
+            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
         }
     }
 
-    private static async Task UpdateRecordAsync(
-        SqlConnection connection, 
-        TableDescription table,
-        TableRecord record, 
-        TableRecord anonymizedRecord, 
-        HashSet<string> pkSet, 
-        CancellationToken cancellationToken = default)
+    private static void AddParameter(DbCommand command, string name, object? value)
     {
-        // Update database with anonymized record (basic update logic)
-        // Build a map of original values by column name (for PKs)
-        var originalByName = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var rf in record.Fields)
-        {
-            if (rf == null) continue;
-            originalByName[rf.Name] = rf.Value;
-        }
-
-        // Determine changed fields (those provided by the transformer) excluding PKs
-        var changed = anonymizedRecord.Fields
-            .OfType<TableRecordField>()
-            .Where(nf => !pkSet.Contains(nf.Name))
-            .ToList();
-
-        // If nothing changed or no PK available, skip update
-        if (changed.Count <= 0 || pkSet.Count <= 0) return;
-
-        var setClause = string.Join(", ", changed.Select((f, idx) => $"[{f.Name}] = @set{idx}"));
-        // Fix order determinism: build a fixed array order for PKs to reuse for params and WHERE
-        var pkOrder = pkSet.ToArray();
-        var whereClause = string.Join(" AND ", pkOrder.Select((pk, idx) => $"[{pk}] = @pk{idx}"));
-        var updateSql = $"UPDATE {table.Name} SET {setClause} WHERE {whereClause}";
-
-        await using var updateCmd = new SqlCommand(updateSql, connection);
-
-        // SET parameters
-        for (var i = 0; i < changed.Count; i++)
-        {
-            var val = changed[i].Value ?? DBNull.Value;
-            updateCmd.Parameters.AddWithValue($"@set{i}", val);
-        }
-
-        // WHERE parameters (PKs) – use original values
-        for (var pkIndex = 0; pkIndex < pkOrder.Length; pkIndex++)
-        {
-            var pk = pkOrder[pkIndex];
-            originalByName.TryGetValue(pk, out var pkVal);
-            updateCmd.Parameters.AddWithValue($"@pk{pkIndex}", pkVal ?? DBNull.Value);
-        }
-
-        await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.Value = value ?? DBNull.Value;
+        command.Parameters.Add(parameter);
     }
 
     public Task<bool> IsImpactedAsync(ScriptSpecification script, TableDescription table, FieldDescription field, CancellationToken cancellationToken = default)
-    {
-        foreach (var rule in script.Rules)
-        {
-            if (rule.Table != table.Name) continue;
-            
-            if (rule.Column == field.Path) return Task.FromResult(true);
-        }
-        
-        return Task.FromResult(false);
-    }
+        => Task.FromResult(!field.IsPrimaryKey && script.Rules.Any(r => r.Table == table.Name && r.Column == field.Path));
 }

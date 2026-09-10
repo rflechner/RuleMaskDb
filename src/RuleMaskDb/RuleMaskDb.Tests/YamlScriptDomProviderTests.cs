@@ -1,4 +1,4 @@
-﻿using RuleMaskDb.ScriptDom;
+using RuleMaskDb.ScriptDom;
 using RuleMaskDb.Yaml;
 
 namespace RuleMaskDb.Tests;
@@ -52,4 +52,28 @@ public class YamlScriptDomProviderTests
         });
         
     }
-}
+    [TestCase("PostgreSql", DatabaseType.PostgreSQL)]
+    [TestCase("sqlserver", DatabaseType.SqlServer)]
+    public async Task Parses_database_type_case_insensitively(string type, DatabaseType expected)
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(path, $"database:\n  type: {type}\n  connectionString: demo\nrules: []");
+            Assert.That((await new YamlScriptDomProvider(path).LoadScriptAsync()).Database.DatabaseType, Is.EqualTo(expected));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [TestCase("postgre_typo")]
+    [TestCase("1234")]
+    public async Task Rejects_unknown_database_type(string type)
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(path, $"database:\n  type: {type}\n  connectionString: demo\nrules: []");
+            Assert.ThrowsAsync<InvalidOperationException>(async () => await new YamlScriptDomProvider(path).LoadScriptAsync());
+        }
+        finally { File.Delete(path); }
+    }}

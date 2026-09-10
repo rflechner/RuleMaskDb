@@ -1,4 +1,4 @@
-﻿using System.Collections.Immutable;
+using System.Collections.Immutable;
 using Microsoft.Data.SqlClient;
 using RuleMaskDb.ScriptDom;
 using RuleMaskDb.SqlDomain;
@@ -121,7 +121,7 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
             tableDescriptions.Add(new TableDescription(
                 Name: $"{schema}.{name}",
                 RowCount: (int)Math.Min(int.MaxValue, rowCount),
-                Fields: fields));
+                Fields: fields) { Schema = schema, LocalName = name });
         }
 
         return tableDescriptions;
@@ -147,7 +147,7 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
                              FROM sys.dm_db_partition_stats AS p
                              WHERE p.object_id = OBJECT_ID(@fullName) AND p.index_id IN (0,1)";
         await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@fullName", $"[{schema}].[{table}]");
+        cmd.Parameters.AddWithValue("@fullName", $"[{schema.Replace("]", "]]")}].[{table.Replace("]", "]]")}]");
         var obj = await cmd.ExecuteScalarAsync();
         if (obj is null or DBNull) return 0L;
         return Convert.ToInt64(obj);

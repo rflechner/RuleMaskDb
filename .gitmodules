@@ -1,0 +1,3 @@
+[submodule "submodules/pagila"]
+	path = submodules/pagila
+	url = https://github.com/devrimgunduz/pagila

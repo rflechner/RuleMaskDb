@@ -1,0 +1,11 @@
+# Use a disposable copy, never the database being explored or production.
+database:
+  type: PostgreSQL
+  connectionString: 'Host=127.0.0.1;Port=55433;Database=rulemask_test;Username=postgres;Password=rulemask_test_only'
+rules:
+  - table: public.people
+    column: first_name
+    generator: FirstName
+  - table: public.people
+    column: last_name
+    generator: Name
