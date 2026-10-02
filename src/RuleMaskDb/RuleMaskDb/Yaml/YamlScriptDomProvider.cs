@@ -27,15 +27,8 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
 
         // Map rules
         var rules = (doc.Rules ?? Enumerable.Empty<YamlRule>())
-            .Select(r =>
-            {
-                GeneratorType? gen = null;
-                if (!string.IsNullOrWhiteSpace(r.Generator) && Enum.TryParse<GeneratorType>(r.Generator, true, out var g))
-                {
-                    gen = g;
-                }
-                return new Rule(r.Table ?? string.Empty, r.Column ?? string.Empty, r.Mask, gen);
-            })
+            .Select(r => new Rule(r.Table ?? string.Empty, r.Column ?? string.Empty, r.Mask,
+                string.IsNullOrWhiteSpace(r.Generator) ? null : r.Generator.Trim()))
             .ToImmutableArray();
 
         return new ScriptSpecification(database, rules);

@@ -5,6 +5,13 @@ namespace RuleMaskDb.Generators;
 public interface IDataGeneratorFactory
 {
     IDataGenerator Create(GeneratorType generatorType);
+
+    Sdk.IDataGenerator Create(string name)
+    {
+        var match = Enum.GetNames<GeneratorType>().FirstOrDefault(n => n.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (match is null) throw new InvalidOperationException($"Unknown generator: {name}");
+        return Create(Enum.Parse<GeneratorType>(match));
+    }
 }
 
 public class BogusDataGeneratorFactory : IDataGeneratorFactory
@@ -32,7 +39,6 @@ public class BogusDataGeneratorFactory : IDataGeneratorFactory
     }
 }
 
-public interface IDataGenerator
+public interface IDataGenerator : Sdk.IDataGenerator
 {
-    Task<object> GenerateValueAsync(CancellationToken cancellationToken = default);
 }

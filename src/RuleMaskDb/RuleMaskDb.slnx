@@ -10,4 +10,6 @@
   <Project Path="RuleMaskDb.ConsoleApp/RuleMaskDb.ConsoleApp.csproj" />
   <Project Path="RuleMaskDb.Tests/RuleMaskDb.Tests.csproj" />
   <Project Path="RuleMaskDb/RuleMaskDb.csproj" />
+  <Project Path="Sdk/Sdk.csproj" />
+  <Project Path="RuleMaskDb.LocalEmailPlugin/RuleMaskDb.LocalEmailPlugin.csproj" />
 </Solution>

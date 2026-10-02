@@ -39,7 +39,7 @@ public class YamlScriptDomProviderTests
             Assert.That(rule2.Table, Is.EqualTo("dbo.DimCustomer"));
             Assert.That(rule2.Column, Is.EqualTo("MiddleName"));
             Assert.That(rule2.Mask, Is.Null);
-            Assert.That(rule2.Generator, Is.EqualTo(GeneratorType.Name));
+            Assert.That(rule2.Generator, Is.EqualTo("Name"));
         });
         
         var rule3 = spec.Rules[2];
@@ -48,7 +48,7 @@ public class YamlScriptDomProviderTests
             Assert.That(rule3.Table, Is.EqualTo("dbo.DimEmployee"));
             Assert.That(rule3.Column, Is.EqualTo("FirstName"));
             Assert.That(rule3.Mask, Is.Null);
-            Assert.That(rule3.Generator, Is.EqualTo(GeneratorType.Name));
+            Assert.That(rule3.Generator, Is.EqualTo("Name"));
         });
         
     }
