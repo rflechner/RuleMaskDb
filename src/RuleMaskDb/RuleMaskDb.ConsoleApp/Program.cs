@@ -23,7 +23,9 @@ class Program
         services.AddSingleton<IDatabaseAnalyzer, DatabaseAnalyzer>();
         services.AddSingleton<IScriptDomProviderFactory, ScriptDomProviderFactory>();
         services.AddSingleton<IScriptRunner, ScriptRunner>();
-        services.AddSingleton<IDataGeneratorFactory, BogusDataGeneratorFactory>();
+        services.AddSingleton(_ => PluginCatalog.Discover(
+            Environment.GetEnvironmentVariable("RULEMASK_PLUGINS_DIRECTORY") ?? Path.Combine(AppContext.BaseDirectory, "plugins")));
+        services.AddSingleton<IDataGeneratorFactory, PluginDataGeneratorFactory>();
         services.AddSingleton<DescribeDatabaseCommand>();
         
         var app = new CommandApp(new ServiceCollectionRegistar(services));
@@ -31,6 +33,7 @@ class Program
         {
             config.AddCommand<DescribeDatabaseCommand>("describe");
             config.AddCommand<RunScriptCommand>("run");
+            config.AddCommand<ListPluginsCommand>("plugins");
         });
 
         return await app.RunAsync(args);

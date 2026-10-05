@@ -12,7 +12,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         cancellationToken.ThrowIfCancellationRequested();
         var driver = new RelationalDriver(script.Database.DatabaseType);
         var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
-        var plans = new List<(TableDescription Table, Rule[] Rules)>();
+        var plans = new List<(TableDescription Table, Rule[] Rules, Sdk.IDataGenerator[] Generators)>();
         // Validate every target before making the first change.
         foreach (var group in script.Rules.GroupBy(r => r.Table))
         {
@@ -30,9 +30,10 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             }
             if (!table.Fields.Any(f => f.IsPrimaryKey))
                 throw new InvalidOperationException($"Table has no primary key: {table.Name}");
-            plans.Add((table, rules));
+            var generators = rules.Select(r => dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
+            plans.Add((table, rules, generators));
         }
-        foreach (var (table, rules) in plans)
+        foreach (var (table, rules, generators) in plans)
         {
             await using var readerConnection = driver.CreateConnection(script.Database.ConnectionString);
             await using var updaterConnection = driver.CreateConnection(script.Database.ConnectionString);
@@ -43,7 +44,6 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             await using var transaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
                 ? await updaterConnection.BeginTransactionAsync(cancellationToken) : null;
             var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
-            var generators = rules.Select(r => dataGeneratorFactory.Create(r.Generator ?? GeneratorType.Name)).ToArray();
             await using var select = readerConnection.CreateCommand();
             select.CommandText = $"SELECT {string.Join(", ", keys.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
             await using var reader = await select.ExecuteReaderAsync(cancellationToken);

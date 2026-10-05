@@ -61,6 +61,49 @@ PostgreSQL commits each table independently and rolls back the current table on 
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If no generator is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
 
+## Generator plugins
+
+The `Sdk` project builds `RuleMaskDb.Sdk.dll` and has no dependency on the engine or Bogus. Reference it from a .NET 10 class library, implement `RuleMaskDb.Sdk.IDataGenerator`, and annotate a public class with `[Generator("YourName")]`. The class must have a public parameterless constructor. One instance is created per configured column; `GenerateValueAsync` receives the run's cancellation token.
+
+The included `RuleMaskDb.LocalEmailPlugin` is a complete example:
+
+```csharp
+using RuleMaskDb.Sdk;
+
+[Generator("LocalEmail")]
+public sealed class LocalEmailGenerator : IDataGenerator
+{
+    public Task<object> GenerateValueAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<object>($"user-{Guid.NewGuid():N}@local");
+    }
+}
+```
+
+By default the CLI discovers DLLs in `plugins` beside its executable, including subdirectories. Alternatively set `RULEMASK_PLUGINS_DIRECTORY` to a plugin directory (relative paths are relative to the working directory). Keep each plugin and its dependencies together, preferably in its own subdirectory; publishing the class library supplies its dependencies and `.deps.json`. The host shares its SDK assembly with every plugin. Install only trusted DLLs: plugins execute inside the application process. Restart the application after changing plugins.
+
+Build and discover the example from the repository root in PowerShell:
+
+```powershell
+dotnet build src/RuleMaskDb/RuleMaskDb.slnx
+$env:RULEMASK_PLUGINS_DIRECTORY = (Resolve-Path src/RuleMaskDb/RuleMaskDb.LocalEmailPlugin/bin/Debug/net10.0).Path
+dotnet run --project src/RuleMaskDb/RuleMaskDb.ConsoleApp -- plugins
+# Run your YAML using this same environment:
+# dotnet run --project src/RuleMaskDb/RuleMaskDb.ConsoleApp -- run --script $script
+```
+
+Select the plugin by name for a column:
+
+```yaml
+rules:
+  - table: public.people
+    column: email
+    generator: LocalEmail
+```
+
+`LocalEmail` always produces an address ending in `@local`. Names are matched without regard to case. Plugins take priority over built-in generators: naming a plugin `Email` overrides the built-in `Email`. Duplicate names between plugins and invalid generator declarations are errors. Missing or blank names still default to `Name`; unknown names fail before any database updates. DLL loading failures include the file path in the error. A missing plugin directory simply leaves the built-in generators available. The example plugin is installed explicitly and is not bundled into the CLI automatically.
+
 ## Reproducible PostgreSQL tests
 
 Create a dedicated container; ports 5432 and 5433 and existing Pagila instances are not used:

@@ -30,6 +30,7 @@
 
     <ItemGroup>
       <ProjectReference Include="..\RuleMaskDb\RuleMaskDb.csproj" />
+      <ProjectReference Include="../RuleMaskDb.LocalEmailPlugin/RuleMaskDb.LocalEmailPlugin.csproj" />
     </ItemGroup>
 
 </Project>
