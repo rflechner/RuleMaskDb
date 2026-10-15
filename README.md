@@ -53,15 +53,50 @@ Use the exact `schema.table` and column names reported by `describe`, including 
 
 ## Engine behavior
 
-The CLI dispatches schema discovery to the selected provider. A shared ADO.NET runner reads original primary keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key. Only targeted columns appear in `SET`; primary keys and untargeted columns are not assigned by the engine.
+The CLI dispatches schema discovery to the selected provider. A shared ADO.NET runner reads original row keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key, or a configured single-column key when no primary key exists. Only targeted columns appear in `SET`; row keys and untargeted columns are not assigned by the engine.
 
 Targeted fields containing SQL `NULL` or an empty string (`""`) are preserved without calling their generator, including plugin generators. Whitespace-only strings, zero and `false` are still anonymized. Rows with no populated targeted fields are not updated, but still count toward progress. This behavior applies to both SQL Server and PostgreSQL.
 
-All rule targets are validated before writes. Missing tables/columns, duplicate column rules, primary-key rules and tables without primary keys fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
+All rule targets are validated before writes. Missing tables/columns, duplicate column rules, row-key rules and tables without a usable key fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
 
 PostgreSQL commits each table independently and rolls back the current table on failure or cancellation. Previously committed tables remain changed. SQL Server retains row-by-row autocommit, avoiding a long updater transaction that could block its separate streaming reader. Run against an otherwise idle database copy. Database triggers, constraints and generated columns still apply: incompatible values can fail; triggers can have additional effects.
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If no generator is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
+
+## Tables without a primary key
+
+Use the optional top-level `tableKeys` mapping to designate an existing column as the row identifier for a table without a declared primary key:
+
+```yaml
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true'
+
+tableKeys:
+  dbo.LegacyCustomers: CustomerCode
+
+rules:
+  - table: dbo.LegacyCustomers
+    column: FirstName
+    generator: FirstName
+  - table: dbo.LegacyCustomers
+    column: LastName
+    generator: LastName
+```
+
+Both SQL Server and PostgreSQL use the configured column in the parameterized `WHERE` clause, just as they use a primary key. This does not add a column, index, or constraint, and it does not change the database schema.
+
+Safety and scope:
+
+- Configure one existing column per table, using the exact table/column names reported by `describe`. It need not have a UNIQUE constraint or an index.
+- The column must contain no SQL NULLs and no duplicate values. The engine checks **every configured key before updating any table**, using the database's own grouping/equality/collation semantics. Empty tables pass the data check.
+- Key columns cannot themselves be anonymized. A rule targeting the configured key is rejected, and `describe` does not mark it as impacted.
+- A configured key is only for tables without a primary key. If the table already has one (including a composite primary key), remove its `tableKeys` entry; normal primary-key handling remains unchanged.
+- Missing columns, blank names and entries with no matching rule are errors. Tables without a primary key still fail if no `tableKeys` entry is supplied.
+- Configured composite keys and automatic UNIQUE-index discovery are not implemented.
+- The key's SQL type must support equality and `GROUP BY`. Checking large tables may require a full scan; an index on the key can improve validation and per-row update performance.
+
+Run against an otherwise idle, non-production copy. The data check is not a new uniqueness constraint and does not prevent concurrent inserts or key changes. Triggers that change key values are also outside this guarantee. The existing one-row affected check and provider transaction behavior remain in effect.
 
 ## First names, surnames and mapped parameters
 

@@ -35,7 +35,12 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
             })
             .ToImmutableArray();
 
-        return new ScriptSpecification(database, rules);
+        var tableKeys = (doc.TableKeys ?? new Dictionary<string, string>())
+            .ToImmutableDictionary(StringComparer.Ordinal);
+        foreach (var (table, column) in tableKeys)
+            if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
+                throw new InvalidOperationException("tableKeys requires non-empty table and column names.");
+        return new ScriptSpecification(database, rules) { TableKeys = tableKeys };
     }
 
     private static GeneratorParameter ToParameter(string name, YamlParameter? parameter)
@@ -62,6 +67,7 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
     {
         public YamlDatabase? Database { get; set; }
         public List<YamlRule>? Rules { get; set; }
+        public Dictionary<string, string>? TableKeys { get; set; }
     }
 
     private sealed class YamlDatabase
