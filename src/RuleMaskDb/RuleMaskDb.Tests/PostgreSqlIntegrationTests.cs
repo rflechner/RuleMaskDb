@@ -50,7 +50,58 @@ public class PostgreSqlIntegrationTests
         Assert.That(await ReadRows(), Is.EqualTo(new[] {
             "1|7|Fake' first|Fake last|keep-1|case-1",
             "2|7|Fake' first|Fake last|keep-2|case-2",
-            "2|8|Fake' first|Fake last|keep-3|case-3" }));
+            "2|8||Fake last|keep-3|case-3" }));
+    }
+
+    [TestCase(null, null)]
+    [TestCase("", "")]
+    [TestCase(null, "")]
+    [TestCase(null, "Smith")]
+    [TestCase("", "Smith")]
+    [TestCase("Alice", null)]
+    [TestCase("Alice", "")]
+    [TestCase("Alice", "Smith")]
+    [TestCase(" ", "\t")]
+    public async Task Null_and_empty_fields_are_preserved_without_generating_or_updating_them(string? first, string? last)
+    {
+        await Execute($"DELETE FROM {table} WHERE NOT (\"Tenant\" = 1 AND \"Id\" = 7)");
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using (var seed = new NpgsqlCommand($"UPDATE {table} SET \"First.Name\" = @first, \"Last\"\"Name\" = @last", connection))
+        {
+            seed.Parameters.AddWithValue("first", NpgsqlTypes.NpgsqlDbType.Text, (object?)first ?? DBNull.Value);
+            seed.Parameters.AddWithValue("last", NpgsqlTypes.NpgsqlDbType.Text, (object?)last ?? DBNull.Value);
+            await seed.ExecuteNonQueryAsync();
+        }
+        // Reject any assignment to a skipped column, even if it would write the same value.
+        await Execute($"""
+            CREATE FUNCTION {driver.QuoteIdentifier(schema)}.reject_update() RETURNS trigger
+            LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''Skipped field was updated''; END';
+            """);
+        var expectedCalls = 0;
+        foreach (var (column, value) in new[] { ("First.Name", first), ("Last\"Name", last) })
+        {
+            if (string.IsNullOrEmpty(value))
+                await Execute($"""
+                    CREATE TRIGGER {driver.QuoteIdentifier("reject_" + column)} BEFORE UPDATE OF {driver.QuoteIdentifier(column)}
+                    ON {table} FOR EACH ROW EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.reject_update();
+                    """);
+            else
+                expectedCalls++;
+        }
+        var factory = new CountingFactory();
+        var progress = new RecordingProgress();
+        await new ScriptRunner(new DatabaseAnalyzer(), factory).RunAsync(await LoadYaml(), progress);
+
+        await using var command = new NpgsqlCommand($"SELECT \"First.Name\", \"Last\"\"Name\", \"untouched\" FROM {table}", connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.That(await reader.ReadAsync(), Is.True);
+        Assert.That(reader.GetValue(0), Is.EqualTo(first is null ? (object)DBNull.Value : first.Length == 0 ? "" : "masked"));
+        Assert.That(reader.GetValue(1), Is.EqualTo(last is null ? (object)DBNull.Value : last.Length == 0 ? "" : "masked"));
+        Assert.That(reader.GetString(2), Is.EqualTo("keep-1"));
+        Assert.That(await reader.ReadAsync(), Is.False);
+        Assert.That(factory.Calls, Is.EqualTo(expectedCalls));
+        Assert.That(progress.Reports, Is.EqualTo(new[] { (1, 1) }));
     }
 
     [TestCase("Id")]
@@ -143,6 +194,26 @@ public class PostgreSqlIntegrationTests
         return rows.ToArray();
     }
 
+    private sealed class CountingFactory : IDataGeneratorFactory, Sdk.IDataGenerator
+    {
+        public int Calls { get; private set; }
+        public IDataGenerator Create(GeneratorType type) => throw new InvalidOperationException("Use the SDK generator path");
+        public Sdk.IDataGenerator Create(string name) => this;
+        public Task<object> GenerateValueAsync(CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult<object>("masked");
+        }
+    }
+    private sealed class RecordingProgress : IProgressReporter
+    {
+        public List<(int Step, int Total)> Reports { get; } = [];
+        public Task ReportProgressAsync(string tableName, int step, int totalStepCount, CancellationToken cancellationToken = default)
+        {
+            Reports.Add((step, totalStepCount));
+            return Task.CompletedTask;
+        }
+    }
     private sealed class FixedFactory : IDataGeneratorFactory
     {
         public IDataGenerator Create(GeneratorType type) => new FixedGenerator(type == GeneratorType.FirstName ? "Fake' first" : "Fake last");
