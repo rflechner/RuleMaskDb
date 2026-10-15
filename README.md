@@ -71,18 +71,18 @@ Generator parameters can read another column in the **same original row** and ma
 
 ```yaml
 rules:
-  - table: dbo.Clients
-    column: Prenom
+  - table: dbo.Customers
+    column: FirstName
     generator: FirstName
     parameters:
       gender:
-        column: Civilite
+        column: Title
         mapping:
           "M.": Male
           "Mme": Female
         fallback: Unknown
-  - table: dbo.Clients
-    column: Nom
+  - table: dbo.Customers
+    column: LastName
     generator: LastName
 ```
 
@@ -146,7 +146,7 @@ The same mapping mechanism can supply that plugin's own enum:
 
 ```yaml
 rules:
-  - table: dbo.Clients
+  - table: dbo.Customers
     column: DisplayName
     generator: CustomerSegment
     parameters:
