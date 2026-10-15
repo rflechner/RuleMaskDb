@@ -14,5 +14,6 @@ public enum GeneratorType
     DateOfBirth,
     CreditCardNumber,
     CreditCardExpirationDate,
-    CreditCardSecurityCode
+    CreditCardSecurityCode,
+    LastName
 }
