@@ -8,4 +8,4 @@ rules:
     generator: FirstName
   - table: public.people
     column: last_name
-    generator: Name
+    generator: LastName

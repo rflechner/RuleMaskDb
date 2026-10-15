@@ -22,6 +22,7 @@ public class BogusDataGeneratorFactory : IDataGeneratorFactory
         return generatorType switch
         {
             GeneratorType.FirstName => new FirstNameGenerator(faker),
+            GeneratorType.LastName => new LastNameGenerator(faker),
             GeneratorType.Name => new NameGenerator(faker),
             GeneratorType.AddressLine => new AddressLineGenerator(faker),
             GeneratorType.City => new CityGenerator(faker),

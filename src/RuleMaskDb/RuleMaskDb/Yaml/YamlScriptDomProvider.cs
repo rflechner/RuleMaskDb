@@ -28,10 +28,32 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         // Map rules
         var rules = (doc.Rules ?? Enumerable.Empty<YamlRule>())
             .Select(r => new Rule(r.Table ?? string.Empty, r.Column ?? string.Empty, r.Mask,
-                string.IsNullOrWhiteSpace(r.Generator) ? null : r.Generator.Trim()))
+                string.IsNullOrWhiteSpace(r.Generator) ? null : r.Generator.Trim())
+            {
+                Parameters = (r.Parameters ?? new Dictionary<string, YamlParameter>())
+                    .ToImmutableDictionary(p => p.Key, p => ToParameter(p.Key, p.Value), StringComparer.Ordinal)
+            })
             .ToImmutableArray();
 
         return new ScriptSpecification(database, rules);
+    }
+
+    private static GeneratorParameter ToParameter(string name, YamlParameter? parameter)
+    {
+        if (parameter is null || string.IsNullOrWhiteSpace(parameter.Column))
+            throw new InvalidOperationException($"Parameter '{name}' requires a source column.");
+        if (parameter.Mapping?.Values.Any(v => v is null) == true)
+            throw new InvalidOperationException($"Null mapping output for parameter '{name}'.");
+        return new GeneratorParameter(parameter.Column,
+            (parameter.Mapping ?? new Dictionary<string, string>()).ToImmutableDictionary(StringComparer.Ordinal),
+            parameter.Fallback);
+    }
+
+    private sealed class YamlParameter
+    {
+        public string? Column { get; set; }
+        public Dictionary<string, string>? Mapping { get; set; }
+        public string? Fallback { get; set; }
     }
 
     // Internal DTOs to match the YAML structure without leaking YamlDotNet attributes into domain types
@@ -53,5 +75,6 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         public string? Column { get; set; }
         public string? Mask { get; set; }
         public string? Generator { get; set; }
+        public Dictionary<string, YamlParameter>? Parameters { get; set; }
     }
 }

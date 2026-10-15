@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Npgsql;
 using RuleMaskDb.Generators;
 using RuleMaskDb.ScriptDom;
@@ -102,6 +103,26 @@ public class PostgreSqlIntegrationTests
         Assert.That(await reader.ReadAsync(), Is.False);
         Assert.That(factory.Calls, Is.EqualTo(expectedCalls));
         Assert.That(progress.Reports, Is.EqualTo(new[] { (1, 1) }));
+    }
+
+    [Test]
+    public async Task Mapped_parameters_use_original_source_even_when_source_is_anonymized_first()
+    {
+        var script = await LoadYaml();
+        var source = new Rule(schema + ".People\" Records", "First.name", null, GeneratorType.Name);
+        var target = script.Rules[0] with
+        {
+            Parameters = System.Collections.Immutable.ImmutableDictionary<string, GeneratorParameter>.Empty.Add("gender",
+                new GeneratorParameter("First.name",
+                    new Dictionary<string, string> { ["case-1"] = "Male", ["case-2"] = "Female" }
+                        .ToImmutableDictionary(), "Unknown"))
+        };
+        script = script with { Rules = System.Collections.Immutable.ImmutableArray.Create(source, target) };
+        await new ScriptRunner(new DatabaseAnalyzer(), new ContextFactory()).RunAsync(script, new Progress());
+        Assert.That(await ReadRows(), Is.EqualTo(new[] {
+            "1|7|Male|Smith|keep-1|changed",
+            "2|7|Female|Jones|keep-2|changed",
+            "2|8||Brown|keep-3|changed" }));
     }
 
     [TestCase("Id")]
@@ -213,6 +234,20 @@ public class PostgreSqlIntegrationTests
             Reports.Add((step, totalStepCount));
             return Task.CompletedTask;
         }
+    }
+    private sealed class ContextFactory : IDataGeneratorFactory
+    {
+        public IDataGenerator Create(GeneratorType type) => new FixedGenerator("changed");
+        public Sdk.IDataGenerator Create(string name)
+            => name == "FirstName" ? new GenderEcho() : new FixedGenerator("changed");
+    }
+    private sealed class GenderEcho : Sdk.IContextualDataGenerator
+    {
+        public void ValidateParameters(IReadOnlyDictionary<string, IReadOnlyCollection<string>> possibleValues) { }
+        public Task<object> GenerateValueAsync(CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Expected row context");
+        public Task<object> GenerateValueAsync(Sdk.GenerationContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<object>(context.GetEnum("gender", Sdk.Gender.Unknown).ToString());
     }
     private sealed class FixedFactory : IDataGeneratorFactory
     {

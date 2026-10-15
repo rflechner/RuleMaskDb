@@ -31,6 +31,8 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             if (!table.Fields.Any(f => f.IsPrimaryKey))
                 throw new InvalidOperationException($"Table has no primary key: {table.Name}");
             var generators = rules.Select(r => dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
+            for (var i = 0; i < rules.Length; i++)
+                GeneratorParameterResolver.Validate(rules[i], table, generators[i]);
             plans.Add((table, rules, generators));
         }
         foreach (var (table, rules, generators) in plans)
@@ -45,12 +47,18 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 ? await updaterConnection.BeginTransactionAsync(cancellationToken) : null;
             var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
             await using var select = readerConnection.CreateCommand();
-            var columns = keys.Concat(rules.Select(r => r.Column));
+            var columns = keys.Concat(rules.Select(r => r.Column))
+                .Concat(rules.SelectMany(r => r.Parameters.Values.Select(p => p.Column)))
+                .Distinct(StringComparer.Ordinal).ToArray();
             select.CommandText = $"SELECT {string.Join(", ", columns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
             await using var reader = await select.ExecuteReaderAsync(cancellationToken);
             var step = 0;
             while (await reader.ReadAsync(cancellationToken))
             {
+                // Snapshot dependencies before any generator runs; rule order cannot change their values.
+                var originalValues = columns.Select((column, i) => (column, value: (object?)reader.GetValue(i)))
+                    .ToDictionary(p => p.column, p => p.value, StringComparer.Ordinal);
+                var contexts = rules.Select(r => GeneratorParameterResolver.Resolve(r, originalValues)).ToArray();
                 await using var update = updaterConnection.CreateCommand();
                 update.Transaction = transaction;
                 var assignments = new List<string>();
@@ -59,7 +67,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                     var originalValue = reader.GetValue(keys.Length + i);
                     if (originalValue is null or DBNull or string { Length: 0 }) continue;
                     assignments.Add($"{driver.QuoteIdentifier(rules[i].Column)} = @set{i}");
-                    AddParameter(update, $"set{i}", await generators[i].GenerateValueAsync(cancellationToken));
+                    AddParameter(update, $"set{i}", await GeneratorInvocation.GenerateAsync(generators[i], contexts[i], cancellationToken));
                 }
                 if (assignments.Count > 0)
                 {

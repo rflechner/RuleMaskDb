@@ -34,7 +34,7 @@ rules:
     generator: FirstName
   - table: public.people
     column: last_name
-    generator: Name
+    generator: LastName
 ```
 
 From the repository root (PowerShell):
@@ -62,6 +62,103 @@ All rule targets are validated before writes. Missing tables/columns, duplicate 
 PostgreSQL commits each table independently and rolls back the current table on failure or cancellation. Previously committed tables remain changed. SQL Server retains row-by-row autocommit, avoiding a long updater transaction that could block its separate streaming reader. Run against an otherwise idle database copy. Database triggers, constraints and generated columns still apply: incompatible values can fail; triggers can have additional effects.
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If no generator is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
+
+## First names, surnames and mapped parameters
+
+Use `FirstName` for a given name, `LastName` for a surname, and `Name` for a full name. Existing `Name` rules keep their meaning; change surname rules explicitly to `LastName`. A surname can naturally contain spaces: `LastName` does not guarantee a single word.
+
+Generator parameters can read another column in the **same original row** and map database-specific codes to provider-independent values:
+
+```yaml
+rules:
+  - table: dbo.Clients
+    column: Prenom
+    generator: FirstName
+    parameters:
+      gender:
+        column: Civilite
+        mapping:
+          "M.": Male
+          "Mme": Female
+        fallback: Unknown
+  - table: dbo.Clients
+    column: Nom
+    generator: LastName
+```
+
+Here `gender` resolves to the SDK enum `RuleMaskDb.Sdk.Gender`: `Male`, `Female`, or `Unknown`. The Bogus adapter converts those values to Bogus's enum. `Unknown` (or no resolved parameter) calls Bogus without a gender constraint; it does not select a special neutral-name list. No gender is inferred from an existing name.
+
+Mapping rules:
+
+- Column names and mapping keys are exact and case-sensitive; no trimming is performed.
+- Database values are converted to strings using invariant culture. For numeric codes use quoted YAML keys, such as `"1": Male` and `"2": Female`. Boolean keys are `"True"` and `"False"`.
+- SQL NULL and unmatched values use `fallback`. An empty string is matched by `"": ...` if configured, otherwise it also uses the fallback.
+- Without a fallback, an unmatched parameter is omitted. For `FirstName.gender`, omission means `Unknown`.
+- Enum output names are case-insensitive. Numeric enum outputs and invalid names are rejected.
+- Missing source columns, invalid gender mappings/fallbacks, unknown FirstName parameters and parameters on generators that do not support them fail before any update connections are opened.
+- All source values are captured before generators run. A source column can also be anonymized by another rule: mapping still uses its original value, independent of rule order.
+- Source columns are only read unless explicitly targeted by their own rule. Null/empty target values remain skipped as described above.
+
+Bogus supports gender-specific first names only for locales containing the corresponding lists. The built-in factory retains its existing default locale (`en`); this change does not introduce YAML locale configuration. The adapter rejects explicit Male/Female mappings if its locale lacks that capability.
+
+This feature does not preserve or force compound first names. It uses the selected Bogus name list as supplied; controlling the number of name components is a separate feature.
+
+### Context-aware plugins
+
+Existing plugins implementing only `IDataGenerator` work unchanged for rules without parameters. To consume parameters, additionally implement `IContextualDataGenerator`:
+
+```csharp
+using RuleMaskDb.Sdk;
+
+[Generator("CustomerSegment")]
+public sealed class CustomerSegmentGenerator : IContextualDataGenerator
+{
+    public enum Segment { Unknown, Retail, Business }
+
+    public void ValidateParameters(
+        IReadOnlyDictionary<string, IReadOnlyCollection<string>> possibleValues)
+    {
+        foreach (var (name, values) in possibleValues)
+        {
+            if (name != "segment")
+                throw new InvalidOperationException($"Unknown parameter: {name}");
+            foreach (var value in values)
+                _ = new GenerationContext(
+                    new Dictionary<string, string> { [name] = value })
+                    .GetEnum("segment", Segment.Unknown);
+        }
+    }
+
+    public Task<object> GenerateValueAsync(CancellationToken cancellationToken = default)
+        => GenerateValueAsync(GenerationContext.Empty, cancellationToken);
+
+    public Task<object> GenerateValueAsync(
+        GenerationContext context, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var segment = context.GetEnum("segment", Segment.Unknown);
+        return Task.FromResult<object>($"anonymous-{segment}");
+    }
+}
+```
+
+The same mapping mechanism can supply that plugin's own enum:
+
+```yaml
+rules:
+  - table: dbo.Clients
+    column: DisplayName
+    generator: CustomerSegment
+    parameters:
+      segment:
+        column: CustomerType
+        mapping:
+          "P": Retail
+          "C": Business
+        fallback: Unknown
+```
+
+`ValidateParameters` receives every configured output and fallback during preflight, including values not currently present in the database. `GenerateValueAsync` receives a read-only snapshot of resolved parameters for one row, not the entire row. The SDK has no dependency on Bogus. Old plugins reject configured parameters explicitly rather than silently ignoring them.
 
 ## Generator plugins
 

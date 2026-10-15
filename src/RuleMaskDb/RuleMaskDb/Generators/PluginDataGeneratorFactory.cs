@@ -15,8 +15,14 @@ public sealed class PluginDataGeneratorFactory(PluginCatalog catalog) : IDataGen
 
     public IDataGenerator Create(GeneratorType generatorType) => new Adapter(Create(generatorType.ToString()));
 
-    private sealed class Adapter(Sdk.IDataGenerator generator) : IDataGenerator
+    private sealed class Adapter(Sdk.IDataGenerator generator) : IDataGenerator, Sdk.IContextualDataGenerator
     {
+        public void ValidateParameters(IReadOnlyDictionary<string, IReadOnlyCollection<string>> possibleValues)
+            => GeneratorInvocation.Validate(generator, possibleValues);
+
+        public Task<object> GenerateValueAsync(Sdk.GenerationContext context, CancellationToken cancellationToken = default)
+            => GeneratorInvocation.GenerateAsync(generator, context, cancellationToken);
+
         public Task<object> GenerateValueAsync(CancellationToken cancellationToken = default)
             => generator.GenerateValueAsync(cancellationToken);
     }
