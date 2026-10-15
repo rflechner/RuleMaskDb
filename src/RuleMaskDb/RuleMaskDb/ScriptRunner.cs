@@ -45,21 +45,30 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 ? await updaterConnection.BeginTransactionAsync(cancellationToken) : null;
             var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
             await using var select = readerConnection.CreateCommand();
-            select.CommandText = $"SELECT {string.Join(", ", keys.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
+            var columns = keys.Concat(rules.Select(r => r.Column));
+            select.CommandText = $"SELECT {string.Join(", ", columns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
             await using var reader = await select.ExecuteReaderAsync(cancellationToken);
             var step = 0;
             while (await reader.ReadAsync(cancellationToken))
             {
                 await using var update = updaterConnection.CreateCommand();
                 update.Transaction = transaction;
-                var assignments = rules.Select((r, i) => $"{driver.QuoteIdentifier(r.Column)} = @set{i}");
-                var predicates = keys.Select((key, i) => $"{driver.QuoteIdentifier(key)} = @pk{i}");
-                update.CommandText = $"UPDATE {driver.QuoteTable(table)} SET {string.Join(", ", assignments)} WHERE {string.Join(" AND ", predicates)}";
+                var assignments = new List<string>();
                 for (var i = 0; i < generators.Length; i++)
+                {
+                    var originalValue = reader.GetValue(keys.Length + i);
+                    if (originalValue is null or DBNull or string { Length: 0 }) continue;
+                    assignments.Add($"{driver.QuoteIdentifier(rules[i].Column)} = @set{i}");
                     AddParameter(update, $"set{i}", await generators[i].GenerateValueAsync(cancellationToken));
-                for (var i = 0; i < keys.Length; i++) AddParameter(update, $"pk{i}", reader.GetValue(i));
-                var affected = await update.ExecuteNonQueryAsync(cancellationToken);
-                if (affected != 1) throw new InvalidOperationException($"Expected one updated row in {table.Name}, got {affected}.");
+                }
+                if (assignments.Count > 0)
+                {
+                    var predicates = keys.Select((key, i) => $"{driver.QuoteIdentifier(key)} = @pk{i}");
+                    update.CommandText = $"UPDATE {driver.QuoteTable(table)} SET {string.Join(", ", assignments)} WHERE {string.Join(" AND ", predicates)}";
+                    for (var i = 0; i < keys.Length; i++) AddParameter(update, $"pk{i}", reader.GetValue(i));
+                    var affected = await update.ExecuteNonQueryAsync(cancellationToken);
+                    if (affected != 1) throw new InvalidOperationException($"Expected one updated row in {table.Name}, got {affected}.");
+                }
                 await progressReporter.ReportProgressAsync(table.Name, ++step, table.RowCount, cancellationToken);
             }
             if (transaction is not null) await transaction.CommitAsync(cancellationToken);

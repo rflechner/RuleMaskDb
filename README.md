@@ -53,7 +53,9 @@ Use the exact `schema.table` and column names reported by `describe`, including 
 
 ## Engine behavior
 
-The CLI dispatches schema discovery to the selected provider. A shared ADO.NET runner reads original primary keys, generates replacement values and issues parameterized updates using every component of the primary key. Only targeted columns appear in `SET`; primary keys and untargeted columns are not assigned by the engine.
+The CLI dispatches schema discovery to the selected provider. A shared ADO.NET runner reads original primary keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key. Only targeted columns appear in `SET`; primary keys and untargeted columns are not assigned by the engine.
+
+Targeted fields containing SQL `NULL` or an empty string (`""`) are preserved without calling their generator, including plugin generators. Whitespace-only strings, zero and `false` are still anonymized. Rows with no populated targeted fields are not updated, but still count toward progress. This behavior applies to both SQL Server and PostgreSQL.
 
 All rule targets are validated before writes. Missing tables/columns, duplicate column rules, primary-key rules and tables without primary keys fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
 
