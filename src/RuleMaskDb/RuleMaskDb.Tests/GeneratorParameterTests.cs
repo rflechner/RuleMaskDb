@@ -69,7 +69,7 @@ public sealed class GeneratorParameterTests
         var rule = RuleFor();
         var binding = rule.Parameters["gender"];
         rule = rule with { Parameters = rule.Parameters.SetItem("gender",
-            binding with { Mapping = binding.Mapping.Add("", "Female") }) };
+            binding with { Mapping = binding.Mapping!.Add("", "Female") }) };
         var row = new Dictionary<string, object?> { ["Civilite"] = "" };
         var context = GeneratorParameterResolver.Resolve(rule, row);
         row["Civilite"] = "M.";
@@ -119,7 +119,8 @@ public sealed class GeneratorParameterTests
         for (var i = 0; i < 20; i++)
             Assert.That(await generator.GenerateValueAsync(), Is.EqualTo(expected.Name.LastName()));
         Sdk.IDataGenerator resolved = ((IDataGeneratorFactory)new BogusDataGeneratorFactory()).Create("LastName");
-        Assert.That(resolved, Is.TypeOf<LastNameGenerator>());
+        Assert.That(resolved, Is.InstanceOf<IContextualDataGenerator>());
+        Assert.That(await resolved.GenerateValueAsync(), Is.TypeOf<string>());
     }
 
     [TestCase("column")]
@@ -138,7 +139,7 @@ public sealed class GeneratorParameterTests
         rule = error switch
         {
             "column" => rule with { Parameters = rule.Parameters.SetItem("gender", parameter with { Column = "Missing" }) },
-            "mapping" => rule with { Parameters = rule.Parameters.SetItem("gender", parameter with { Mapping = parameter.Mapping.Add("unused", "Typo") }) },
+            "mapping" => rule with { Parameters = rule.Parameters.SetItem("gender", parameter with { Mapping = parameter.Mapping!.Add("unused", "Typo") }) },
             "fallback" => rule with { Parameters = rule.Parameters.SetItem("gender", parameter with { Fallback = "Typo" }) },
             "parameter" => rule with { Parameters = rule.Parameters.Remove("gender").Add("typo", parameter) },
             _ => rule with { Generator = "Name" }
@@ -186,7 +187,7 @@ public sealed class GeneratorParameterTests
             var script = await new YamlScriptDomProvider(path).LoadScriptAsync();
             var parameter = script.Rules[0].Parameters["gender"];
             Assert.That(parameter.Column, Is.EqualTo("Civilite"));
-            Assert.That(parameter.Mapping["1"], Is.EqualTo("Male"));
+            Assert.That(parameter.Mapping!["1"], Is.EqualTo("Male"));
             Assert.That(parameter.Fallback, Is.EqualTo("Unknown"));
             Assert.That(script.Rules[1].Parameters, Is.Empty);
             Assert.That(script.Rules[1].Generator, Is.EqualTo("LastName"));

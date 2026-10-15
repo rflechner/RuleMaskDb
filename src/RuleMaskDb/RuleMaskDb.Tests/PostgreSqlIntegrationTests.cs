@@ -125,6 +125,29 @@ public class PostgreSqlIntegrationTests
             "2|8||Brown|keep-3|changed" }));
     }
 
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task Culture_parameters_use_original_row_for_direct_and_mapped_bindings(bool mapped)
+    {
+        await Execute($"UPDATE {table} SET \"First.name\" = CASE WHEN \"Tenant\" = 1 THEN 'fr-FR' ELSE 'en-GB' END");
+        var script = await LoadYaml();
+        var source = new Rule(schema + ".People\" Records", "First.name", null, GeneratorType.Name);
+        var binding = new GeneratorParameter("First.name",
+            mapped ? new Dictionary<string, string> { ["fr-FR"] = "fr-CA", ["en-GB"] = "de-DE" }.ToImmutableDictionary() : null,
+            "fr-FR");
+        var target = script.Rules[0] with
+        {
+            Generator = "CultureEcho",
+            Parameters = ImmutableDictionary<string, GeneratorParameter>.Empty.Add("culture", binding)
+        };
+        script = script with { Rules = ImmutableArray.Create(source, target) };
+        await new ScriptRunner(new DatabaseAnalyzer(), new ContextFactory()).RunAsync(script, new Progress());
+        Assert.That(await ReadRows(), Is.EqualTo(new[] {
+            $"1|7|{(mapped ? "fr-CA" : "fr-FR")}|Smith|keep-1|changed",
+            $"2|7|{(mapped ? "de-DE" : "en-GB")}|Jones|keep-2|changed",
+            "2|8||Brown|keep-3|changed" }));
+    }
+
     [TestCase("Id")]
     [TestCase("missing")]
     public async Task Invalid_column_or_primary_key_rule_fails_before_writing(string column)
@@ -143,6 +166,70 @@ public class PostgreSqlIntegrationTests
         var script = await LoadYaml();
         Assert.ThrowsAsync<InvalidOperationException>(async () => await new ScriptRunner(new DatabaseAnalyzer(), new FailingFactory()).RunAsync(script, new Progress()));
         Assert.That(await ReadRows(), Is.EqualTo(before));
+    }
+
+    [TestCase("untouched")]
+    [TestCase("Last\"Name")]
+    public async Task Configured_key_supports_tables_without_primary_keys(string key)
+    {
+        await Execute($"ALTER TABLE {table} DROP CONSTRAINT {driver.QuoteIdentifier("People\" Records_pkey")}");
+        var script = await LoadYaml();
+        script = script with
+        {
+            Rules = script.Rules.Where(r => r.Column != key).ToImmutableArray(),
+            TableKeys = ImmutableDictionary<string, string>.Empty.Add(schema + ".People\" Records", key)
+        };
+        await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress());
+        Assert.That(await ReadRows(), Is.EqualTo(new[] {
+            $"1|7|Fake' first|{(key == "untouched" ? "Fake last" : "Smith")}|keep-1|case-1",
+            $"2|7|Fake' first|{(key == "untouched" ? "Fake last" : "Jones")}|keep-2|case-2",
+            $"2|8||{(key == "untouched" ? "Fake last" : "Brown")}|keep-3|case-3" }));
+        var description = await new DatabaseAnalyzer().DescribeDatabaseAsync(script.Database);
+        Assert.That(description.Tables.Single(t => t.Name == schema + ".People\" Records").Fields.Any(f => f.IsPrimaryKey), Is.False);
+    }
+
+    [TestCase("Id")]
+    [TestCase("First.Name")]
+    public async Task Duplicate_or_null_configured_key_fails_before_writing(string key)
+    {
+        await Execute($"ALTER TABLE {table} DROP CONSTRAINT {driver.QuoteIdentifier("People\" Records_pkey")}");
+        var script = await LoadYaml();
+        script = script with
+        {
+            Rules = script.Rules.Where(r => r.Column != key).ToImmutableArray(),
+            TableKeys = ImmutableDictionary<string, string>.Empty.Add(schema + ".People\" Records", key)
+        };
+        var before = await ReadRows();
+        Assert.That(async () => await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress()),
+            Throws.InvalidOperationException.With.Message.Contains("unique and non-null"));
+        Assert.That(await ReadRows(), Is.EqualTo(before));
+    }
+
+    [Test]
+    public async Task Invalid_configured_key_in_later_table_prevents_all_writes()
+    {
+        var otherTable = driver.QuoteIdentifier(schema) + ".\"NoKey\"";
+        await Execute($"CREATE TABLE {otherTable} (\"Code\" integer, \"Name\" text); INSERT INTO {otherTable} VALUES (1, 'A'), (1, 'B')");
+        var script = await LoadYaml();
+        script = script with
+        {
+            Rules = script.Rules.Add(new Rule(schema + ".NoKey", "Name", null, GeneratorType.Name)),
+            TableKeys = ImmutableDictionary<string, string>.Empty.Add(schema + ".NoKey", "Code")
+        };
+        var before = await ReadRows();
+        Assert.That(async () => await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress()),
+            Throws.InvalidOperationException.With.Message.Contains("unique and non-null"));
+        Assert.That(await ReadRows(), Is.EqualTo(before));
+    }
+
+    [Test]
+    public async Task Empty_table_with_configured_key_succeeds()
+    {
+        await Execute($"ALTER TABLE {table} DROP CONSTRAINT {driver.QuoteIdentifier("People\" Records_pkey")}; DELETE FROM {table}");
+        var script = await LoadYaml();
+        script = script with { TableKeys = ImmutableDictionary<string, string>.Empty.Add(schema + ".People\" Records", "Id") };
+        await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress());
+        Assert.That(await ReadRows(), Is.Empty);
     }
 
     [Test]
@@ -239,7 +326,20 @@ public class PostgreSqlIntegrationTests
     {
         public IDataGenerator Create(GeneratorType type) => new FixedGenerator("changed");
         public Sdk.IDataGenerator Create(string name)
-            => name == "FirstName" ? new GenderEcho() : new FixedGenerator("changed");
+            => name switch
+            {
+                "FirstName" => new GenderEcho(),
+                "CultureEcho" => new CultureEcho(),
+                _ => new FixedGenerator("changed")
+            };
+    }
+    private sealed class CultureEcho : Sdk.IContextualDataGenerator
+    {
+        public void ValidateParameters(IReadOnlyDictionary<string, IReadOnlyCollection<string>> possibleValues) { }
+        public Task<object> GenerateValueAsync(CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Expected row context");
+        public Task<object> GenerateValueAsync(Sdk.GenerationContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<object>(context.GetCulture()!.Name);
     }
     private sealed class GenderEcho : Sdk.IContextualDataGenerator
     {

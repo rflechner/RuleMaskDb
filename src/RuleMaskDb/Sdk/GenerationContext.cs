@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 
 namespace RuleMaskDb.Sdk;
 
@@ -18,5 +19,21 @@ public sealed class GenerationContext
         var match = Enum.GetNames<TEnum>().FirstOrDefault(n => n.Equals(value, StringComparison.OrdinalIgnoreCase));
         if (match is null) throw new InvalidOperationException($"Invalid {typeof(TEnum).Name} value for parameter '{name}': {value}");
         return Enum.Parse<TEnum>(match);
+    }
+
+    /// <summary>Read a .NET culture without changing the process or thread culture.</summary>
+    public CultureInfo? GetCulture(string name = "culture")
+    {
+        if (!Parameters.TryGetValue(name, out var value)) return null;
+        if (string.IsNullOrWhiteSpace(value) || value.Contains('_') || value != value.Trim())
+            throw new InvalidOperationException($"Invalid culture for parameter '{name}': {value}");
+        try
+        {
+            return CultureInfo.GetCultureInfo(value);
+        }
+        catch (CultureNotFoundException exception)
+        {
+            throw new InvalidOperationException($"Invalid culture for parameter '{name}': {value}", exception);
+        }
     }
 }

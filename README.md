@@ -53,15 +53,50 @@ Use the exact `schema.table` and column names reported by `describe`, including 
 
 ## Engine behavior
 
-The CLI dispatches schema discovery to the selected provider. A shared ADO.NET runner reads original primary keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key. Only targeted columns appear in `SET`; primary keys and untargeted columns are not assigned by the engine.
+The CLI dispatches schema discovery to the selected provider. A shared ADO.NET runner reads original row keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key, or a configured single-column key when no primary key exists. Only targeted columns appear in `SET`; row keys and untargeted columns are not assigned by the engine.
 
 Targeted fields containing SQL `NULL` or an empty string (`""`) are preserved without calling their generator, including plugin generators. Whitespace-only strings, zero and `false` are still anonymized. Rows with no populated targeted fields are not updated, but still count toward progress. This behavior applies to both SQL Server and PostgreSQL.
 
-All rule targets are validated before writes. Missing tables/columns, duplicate column rules, primary-key rules and tables without primary keys fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
+All rule targets are validated before writes. Missing tables/columns, duplicate column rules, row-key rules and tables without a usable key fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
 
 PostgreSQL commits each table independently and rolls back the current table on failure or cancellation. Previously committed tables remain changed. SQL Server retains row-by-row autocommit, avoiding a long updater transaction that could block its separate streaming reader. Run against an otherwise idle database copy. Database triggers, constraints and generated columns still apply: incompatible values can fail; triggers can have additional effects.
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If no generator is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
+
+## Tables without a primary key
+
+Use the optional top-level `tableKeys` mapping to designate an existing column as the row identifier for a table without a declared primary key:
+
+```yaml
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true'
+
+tableKeys:
+  dbo.LegacyCustomers: CustomerCode
+
+rules:
+  - table: dbo.LegacyCustomers
+    column: FirstName
+    generator: FirstName
+  - table: dbo.LegacyCustomers
+    column: LastName
+    generator: LastName
+```
+
+Both SQL Server and PostgreSQL use the configured column in the parameterized `WHERE` clause, just as they use a primary key. This does not add a column, index, or constraint, and it does not change the database schema.
+
+Safety and scope:
+
+- Configure one existing column per table, using the exact table/column names reported by `describe`. It need not have a UNIQUE constraint or an index.
+- The column must contain no SQL NULLs and no duplicate values. The engine checks **every configured key before updating any table**, using the database's own grouping/equality/collation semantics. Empty tables pass the data check.
+- Key columns cannot themselves be anonymized. A rule targeting the configured key is rejected, and `describe` does not mark it as impacted.
+- A configured key is only for tables without a primary key. If the table already has one (including a composite primary key), remove its `tableKeys` entry; normal primary-key handling remains unchanged.
+- Missing columns, blank names and entries with no matching rule are errors. Tables without a primary key still fail if no `tableKeys` entry is supplied.
+- Configured composite keys and automatic UNIQUE-index discovery are not implemented.
+- The key's SQL type must support equality and `GROUP BY`. Checking large tables may require a full scan; an index on the key can improve validation and per-row update performance.
+
+Run against an otherwise idle, non-production copy. The data check is not a new uniqueness constraint and does not prevent concurrent inserts or key changes. Triggers that change key values are also outside this guarantee. The existing one-row affected check and provider transaction behavior remain in effect.
 
 ## First names, surnames and mapped parameters
 
@@ -90,18 +125,59 @@ Here `gender` resolves to the SDK enum `RuleMaskDb.Sdk.Gender`: `Male`, `Female`
 
 Mapping rules:
 
+- Each parameter accepts either a fixed `value` or a source `column`, never both. Fixed values cannot have a mapping or fallback.
 - Column names and mapping keys are exact and case-sensitive; no trimming is performed.
 - Database values are converted to strings using invariant culture. For numeric codes use quoted YAML keys, such as `"1": Male` and `"2": Female`. Boolean keys are `"True"` and `"False"`.
 - SQL NULL and unmatched values use `fallback`. An empty string is matched by `"": ...` if configured, otherwise it also uses the fallback.
 - Without a fallback, an unmatched parameter is omitted. For `FirstName.gender`, omission means `Unknown`.
+- With a column but no `mapping`, the original value is passed directly; SQL NULL and empty strings use the fallback (or omit the parameter). An explicit empty mapping (`mapping: {}`) still uses mapping semantics.
 - Enum output names are case-insensitive. Numeric enum outputs and invalid names are rejected.
 - Missing source columns, invalid gender mappings/fallbacks, unknown FirstName parameters and parameters on generators that do not support them fail before any update connections are opened.
 - All source values are captured before generators run. A source column can also be anonymized by another rule: mapping still uses its original value, independent of rule order.
 - Source columns are only read unless explicitly targeted by their own rule. Null/empty target values remain skipped as described above.
 
-Bogus supports gender-specific first names only for locales containing the corresponding lists. The built-in factory retains its existing default locale (`en`); this change does not introduce YAML locale configuration. The adapter rejects explicit Male/Female mappings if its locale lacks that capability.
+Bogus supports gender-specific first names only for locales containing the corresponding lists. The default locale remains `en`; use the `culture` parameter below to select another locale. The adapter rejects explicit Male/Female values if the selected locale lacks that capability.
 
 This feature does not preserve or force compound first names. It uses the selected Bogus name list as supplied; controlling the number of name components is a separate feature.
+
+### Generator cultures
+
+All built-in generators accept a `culture` parameter using .NET culture names. Fix a culture, map database-specific codes, or read a culture directly from a column:
+
+```yaml
+rules:
+  - table: dbo.Customers
+    column: PhoneNumber
+    generator: PhoneNumber
+    parameters:
+      culture:
+        value: fr-FR
+  - table: dbo.Customers
+    column: Address
+    generator: AddressLine
+    parameters:
+      culture:
+        column: CountryCode
+        mapping:
+          "FR": fr-FR
+          "GB": en-GB
+          "DE": de-DE
+          "CA": fr-CA
+        fallback: fr-FR
+  - table: dbo.Customers
+    column: City
+    generator: City
+    parameters:
+      culture:
+        column: CultureCode
+        fallback: fr-FR
+```
+
+The adapter translates supported .NET cultures to verified Bogus locales (for example, `fr-FR → fr`, `en-GB → en_GB`). It does not modify the process/thread culture. Omitting the parameter retains the current English default. Generators whose data is culture-independent can produce the same formats regardless of culture.
+
+Fixed values, mapping outputs and fallbacks are checked before updates. Unmapped direct-column values are checked as each populated target row is processed; invalid values fail rather than silently choosing another locale. Existing transaction/partial-update behavior still applies. Bogus can internally fall back to English for missing parts of a supported locale's dataset.
+
+See [generator culture configuration](docs/generator-cultures.md) for all three modes, compatibility rules, combined gender/culture generation, and plugin guidance.
 
 ### Context-aware plugins
 
@@ -158,7 +234,7 @@ rules:
         fallback: Unknown
 ```
 
-`ValidateParameters` receives every configured output and fallback during preflight, including values not currently present in the database. `GenerateValueAsync` receives a read-only snapshot of resolved parameters for one row, not the entire row. The SDK has no dependency on Bogus. Old plugins reject configured parameters explicitly rather than silently ignoring them.
+`ValidateParameters` receives every fixed value, configured mapping output and fallback during preflight, including values not currently present in the database. Direct-column values are only known while processing rows; plugins must validate them during generation as well. `GenerateValueAsync` receives a read-only snapshot of resolved parameters for one row, not the entire row. Plugins can use `context.GetCulture()` to read a .NET `CultureInfo` (or null if omitted). The SDK has no dependency on Bogus. Old plugins reject configured parameters explicitly rather than silently ignoring them.
 
 ## Generator plugins
 

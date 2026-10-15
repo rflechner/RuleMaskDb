@@ -18,7 +18,12 @@ public class BogusDataGeneratorFactory : IDataGeneratorFactory
 {
     public IDataGenerator Create(GeneratorType generatorType)
     {
-        var faker = new Bogus.Faker();
+        if (!Enum.IsDefined(generatorType)) throw new ArgumentOutOfRangeException(nameof(generatorType), generatorType, null);
+        return new CultureAwareGenerator(faker => CreateGenerator(generatorType, faker));
+    }
+
+    private static IDataGenerator CreateGenerator(GeneratorType generatorType, Bogus.Faker faker)
+    {
         return generatorType switch
         {
             GeneratorType.FirstName => new FirstNameGenerator(faker),

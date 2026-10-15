@@ -12,13 +12,29 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         cancellationToken.ThrowIfCancellationRequested();
         var driver = new RelationalDriver(script.Database.DatabaseType);
         var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
-        var plans = new List<(TableDescription Table, Rule[] Rules, Sdk.IDataGenerator[] Generators)>();
+        var plans = new List<(TableDescription Table, Rule[] Rules, string[] Keys, Sdk.IDataGenerator[] Generators)>();
+        foreach (var (table, column) in script.TableKeys)
+        {
+            if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
+                throw new InvalidOperationException("tableKeys requires non-empty table and column names.");
+            if (!script.Rules.Any(r => r.Table == table))
+                throw new InvalidOperationException($"tableKeys entry has no matching rule: {table}");
+        }
         // Validate every target before making the first change.
         foreach (var group in script.Rules.GroupBy(r => r.Table))
         {
             var matches = database.Tables.Where(t => t.Name == group.Key).ToArray();
             if (matches.Length != 1) throw new InvalidOperationException($"Table target is missing or ambiguous: {group.Key}");
             var table = matches[0];
+            var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
+            if (script.TableKeys.TryGetValue(table.Name, out var configuredKey))
+            {
+                if (keys.Length > 0)
+                    throw new InvalidOperationException($"Table already has a primary key: {table.Name}. Remove its tableKeys entry.");
+                if (!table.Fields.Any(f => f.Path == configuredKey))
+                    throw new InvalidOperationException($"Unknown configured row key: {table.Name}.{configuredKey}");
+                keys = [configuredKey];
+            }
             var rules = group.ToArray();
             if (rules.Select(r => r.Column).Distinct().Count() != rules.Length)
                 throw new InvalidOperationException($"Duplicate column rules for {table.Name}");
@@ -27,15 +43,21 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 var field = table.Fields.SingleOrDefault(f => f.Path == rule.Column)
                     ?? throw new InvalidOperationException($"Unknown column: {table.Name}.{rule.Column}");
                 if (field.IsPrimaryKey) throw new InvalidOperationException($"Cannot anonymize primary key: {table.Name}.{field.Path}");
+                if (keys.Contains(field.Path))
+                    throw new InvalidOperationException($"Cannot anonymize configured row key: {table.Name}.{field.Path}");
             }
-            if (!table.Fields.Any(f => f.IsPrimaryKey))
-                throw new InvalidOperationException($"Table has no primary key: {table.Name}");
+            if (keys.Length == 0)
+                throw new InvalidOperationException($"Table has no primary key: {table.Name}. Configure a unique, non-null column in tableKeys.");
             var generators = rules.Select(r => dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
             for (var i = 0; i < rules.Length; i++)
                 GeneratorParameterResolver.Validate(rules[i], table, generators[i]);
-            plans.Add((table, rules, generators));
+            plans.Add((table, rules, keys, generators));
         }
-        foreach (var (table, rules, generators) in plans)
+        // Check all configured keys before any table is updated.
+        foreach (var plan in plans.Where(p => script.TableKeys.ContainsKey(p.Table.Name)))
+            await ValidateConfiguredKeyAsync(driver, script.Database.ConnectionString, plan.Table, plan.Keys[0], cancellationToken);
+
+        foreach (var (table, rules, keys, generators) in plans)
         {
             await using var readerConnection = driver.CreateConnection(script.Database.ConnectionString);
             await using var updaterConnection = driver.CreateConnection(script.Database.ConnectionString);
@@ -45,10 +67,9 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             // Preserve SQL Server autocommit to avoid updater lock escalation blocking the reader.
             await using var transaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
                 ? await updaterConnection.BeginTransactionAsync(cancellationToken) : null;
-            var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
             await using var select = readerConnection.CreateCommand();
             var columns = keys.Concat(rules.Select(r => r.Column))
-                .Concat(rules.SelectMany(r => r.Parameters.Values.Select(p => p.Column)))
+                .Concat(rules.SelectMany(r => r.Parameters.Values.Where(p => p.Column is not null).Select(p => p.Column!)))
                 .Distinct(StringComparer.Ordinal).ToArray();
             select.CommandText = $"SELECT {string.Join(", ", columns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
             await using var reader = await select.ExecuteReaderAsync(cancellationToken);
@@ -83,6 +104,20 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         }
     }
 
+    private static async Task ValidateConfiguredKeyAsync(RelationalDriver driver, string connectionString,
+        TableDescription table, string key, CancellationToken cancellationToken)
+    {
+        await using var connection = driver.CreateConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        var column = driver.QuoteIdentifier(key);
+        // GROUP BY follows the database's own equality/collation semantics, like UPDATE.
+        command.CommandText = $"SELECT {column} FROM {driver.QuoteTable(table)} GROUP BY {column} HAVING {column} IS NULL OR COUNT(*) > 1";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+            throw new InvalidOperationException($"Configured row key must be unique and non-null: {table.Name}.{key}");
+    }
+
     private static void AddParameter(DbCommand command, string name, object? value)
     {
         var parameter = command.CreateParameter();
@@ -92,5 +127,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
     }
 
     public Task<bool> IsImpactedAsync(ScriptSpecification script, TableDescription table, FieldDescription field, CancellationToken cancellationToken = default)
-        => Task.FromResult(!field.IsPrimaryKey && script.Rules.Any(r => r.Table == table.Name && r.Column == field.Path));
+        => Task.FromResult(!field.IsPrimaryKey
+            && !(script.TableKeys.TryGetValue(table.Name, out var key) && key == field.Path)
+            && script.Rules.Any(r => r.Table == table.Name && r.Column == field.Path));
 }
