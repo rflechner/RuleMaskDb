@@ -48,7 +48,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
             await using var select = readerConnection.CreateCommand();
             var columns = keys.Concat(rules.Select(r => r.Column))
-                .Concat(rules.SelectMany(r => r.Parameters.Values.Select(p => p.Column)))
+                .Concat(rules.SelectMany(r => r.Parameters.Values.Where(p => p.Column is not null).Select(p => p.Column!)))
                 .Distinct(StringComparer.Ordinal).ToArray();
             select.CommandText = $"SELECT {string.Join(", ", columns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
             await using var reader = await select.ExecuteReaderAsync(cancellationToken);

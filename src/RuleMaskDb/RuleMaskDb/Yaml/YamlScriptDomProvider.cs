@@ -40,17 +40,18 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
 
     private static GeneratorParameter ToParameter(string name, YamlParameter? parameter)
     {
-        if (parameter is null || string.IsNullOrWhiteSpace(parameter.Column))
-            throw new InvalidOperationException($"Parameter '{name}' requires a source column.");
-        if (parameter.Mapping?.Values.Any(v => v is null) == true)
-            throw new InvalidOperationException($"Null mapping output for parameter '{name}'.");
-        return new GeneratorParameter(parameter.Column,
-            (parameter.Mapping ?? new Dictionary<string, string>()).ToImmutableDictionary(StringComparer.Ordinal),
-            parameter.Fallback);
+        if (parameter is null)
+            throw new InvalidOperationException($"Parameter '{name}' requires a value or a source column.");
+        var binding = new GeneratorParameter(parameter.Column,
+            parameter.Mapping?.ToImmutableDictionary(StringComparer.Ordinal),
+            parameter.Fallback, parameter.Value);
+        binding.Validate(name);
+        return binding;
     }
 
     private sealed class YamlParameter
     {
+        public string? Value { get; set; }
         public string? Column { get; set; }
         public Dictionary<string, string>? Mapping { get; set; }
         public string? Fallback { get; set; }

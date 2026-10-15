@@ -125,6 +125,29 @@ public class PostgreSqlIntegrationTests
             "2|8||Brown|keep-3|changed" }));
     }
 
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task Culture_parameters_use_original_row_for_direct_and_mapped_bindings(bool mapped)
+    {
+        await Execute($"UPDATE {table} SET \"First.name\" = CASE WHEN \"Tenant\" = 1 THEN 'fr-FR' ELSE 'en-GB' END");
+        var script = await LoadYaml();
+        var source = new Rule(schema + ".People\" Records", "First.name", null, GeneratorType.Name);
+        var binding = new GeneratorParameter("First.name",
+            mapped ? new Dictionary<string, string> { ["fr-FR"] = "fr-CA", ["en-GB"] = "de-DE" }.ToImmutableDictionary() : null,
+            "fr-FR");
+        var target = script.Rules[0] with
+        {
+            Generator = "CultureEcho",
+            Parameters = ImmutableDictionary<string, GeneratorParameter>.Empty.Add("culture", binding)
+        };
+        script = script with { Rules = ImmutableArray.Create(source, target) };
+        await new ScriptRunner(new DatabaseAnalyzer(), new ContextFactory()).RunAsync(script, new Progress());
+        Assert.That(await ReadRows(), Is.EqualTo(new[] {
+            $"1|7|{(mapped ? "fr-CA" : "fr-FR")}|Smith|keep-1|changed",
+            $"2|7|{(mapped ? "de-DE" : "en-GB")}|Jones|keep-2|changed",
+            "2|8||Brown|keep-3|changed" }));
+    }
+
     [TestCase("Id")]
     [TestCase("missing")]
     public async Task Invalid_column_or_primary_key_rule_fails_before_writing(string column)
@@ -239,7 +262,20 @@ public class PostgreSqlIntegrationTests
     {
         public IDataGenerator Create(GeneratorType type) => new FixedGenerator("changed");
         public Sdk.IDataGenerator Create(string name)
-            => name == "FirstName" ? new GenderEcho() : new FixedGenerator("changed");
+            => name switch
+            {
+                "FirstName" => new GenderEcho(),
+                "CultureEcho" => new CultureEcho(),
+                _ => new FixedGenerator("changed")
+            };
+    }
+    private sealed class CultureEcho : Sdk.IContextualDataGenerator
+    {
+        public void ValidateParameters(IReadOnlyDictionary<string, IReadOnlyCollection<string>> possibleValues) { }
+        public Task<object> GenerateValueAsync(CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("Expected row context");
+        public Task<object> GenerateValueAsync(Sdk.GenerationContext context, CancellationToken cancellationToken = default)
+            => Task.FromResult<object>(context.GetCulture()!.Name);
     }
     private sealed class GenderEcho : Sdk.IContextualDataGenerator
     {

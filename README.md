@@ -90,18 +90,59 @@ Here `gender` resolves to the SDK enum `RuleMaskDb.Sdk.Gender`: `Male`, `Female`
 
 Mapping rules:
 
+- Each parameter accepts either a fixed `value` or a source `column`, never both. Fixed values cannot have a mapping or fallback.
 - Column names and mapping keys are exact and case-sensitive; no trimming is performed.
 - Database values are converted to strings using invariant culture. For numeric codes use quoted YAML keys, such as `"1": Male` and `"2": Female`. Boolean keys are `"True"` and `"False"`.
 - SQL NULL and unmatched values use `fallback`. An empty string is matched by `"": ...` if configured, otherwise it also uses the fallback.
 - Without a fallback, an unmatched parameter is omitted. For `FirstName.gender`, omission means `Unknown`.
+- With a column but no `mapping`, the original value is passed directly; SQL NULL and empty strings use the fallback (or omit the parameter). An explicit empty mapping (`mapping: {}`) still uses mapping semantics.
 - Enum output names are case-insensitive. Numeric enum outputs and invalid names are rejected.
 - Missing source columns, invalid gender mappings/fallbacks, unknown FirstName parameters and parameters on generators that do not support them fail before any update connections are opened.
 - All source values are captured before generators run. A source column can also be anonymized by another rule: mapping still uses its original value, independent of rule order.
 - Source columns are only read unless explicitly targeted by their own rule. Null/empty target values remain skipped as described above.
 
-Bogus supports gender-specific first names only for locales containing the corresponding lists. The built-in factory retains its existing default locale (`en`); this change does not introduce YAML locale configuration. The adapter rejects explicit Male/Female mappings if its locale lacks that capability.
+Bogus supports gender-specific first names only for locales containing the corresponding lists. The default locale remains `en`; use the `culture` parameter below to select another locale. The adapter rejects explicit Male/Female values if the selected locale lacks that capability.
 
 This feature does not preserve or force compound first names. It uses the selected Bogus name list as supplied; controlling the number of name components is a separate feature.
+
+### Generator cultures
+
+All built-in generators accept a `culture` parameter using .NET culture names. Fix a culture, map database-specific codes, or read a culture directly from a column:
+
+```yaml
+rules:
+  - table: dbo.Customers
+    column: PhoneNumber
+    generator: PhoneNumber
+    parameters:
+      culture:
+        value: fr-FR
+  - table: dbo.Customers
+    column: Address
+    generator: AddressLine
+    parameters:
+      culture:
+        column: CountryCode
+        mapping:
+          "FR": fr-FR
+          "GB": en-GB
+          "DE": de-DE
+          "CA": fr-CA
+        fallback: fr-FR
+  - table: dbo.Customers
+    column: City
+    generator: City
+    parameters:
+      culture:
+        column: CultureCode
+        fallback: fr-FR
+```
+
+The adapter translates supported .NET cultures to verified Bogus locales (for example, `fr-FR → fr`, `en-GB → en_GB`). It does not modify the process/thread culture. Omitting the parameter retains the current English default. Generators whose data is culture-independent can produce the same formats regardless of culture.
+
+Fixed values, mapping outputs and fallbacks are checked before updates. Unmapped direct-column values are checked as each populated target row is processed; invalid values fail rather than silently choosing another locale. Existing transaction/partial-update behavior still applies. Bogus can internally fall back to English for missing parts of a supported locale's dataset.
+
+See [generator culture configuration](docs/generator-cultures.md) for all three modes, compatibility rules, combined gender/culture generation, and plugin guidance.
 
 ### Context-aware plugins
 
@@ -158,7 +199,7 @@ rules:
         fallback: Unknown
 ```
 
-`ValidateParameters` receives every configured output and fallback during preflight, including values not currently present in the database. `GenerateValueAsync` receives a read-only snapshot of resolved parameters for one row, not the entire row. The SDK has no dependency on Bogus. Old plugins reject configured parameters explicitly rather than silently ignoring them.
+`ValidateParameters` receives every fixed value, configured mapping output and fallback during preflight, including values not currently present in the database. Direct-column values are only known while processing rows; plugins must validate them during generation as well. `GenerateValueAsync` receives a read-only snapshot of resolved parameters for one row, not the entire row. Plugins can use `context.GetCulture()` to read a .NET `CultureInfo` (or null if omitted). The SDK has no dependency on Bogus. Old plugins reject configured parameters explicitly rather than silently ignoring them.
 
 ## Generator plugins
 
