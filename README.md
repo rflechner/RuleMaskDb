@@ -63,6 +63,54 @@ PostgreSQL commits each table independently and rolls back the current table on 
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If neither `generator` nor `value` is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
 
+## Batched updates
+
+Set the root-level `batchSize` to choose how many rows are read and prepared at a time.
+The default is **200**; for example, use **100** for smaller batches:
+
+```yaml
+batchSize: 100
+
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=Demo;Integrated Security=true;TrustServerCertificate=true;'
+
+rules:
+  - table: dbo.Users
+    column: FirstName
+    generator: FirstName
+  - table: dbo.Users
+    column: IsActive
+    value: false
+```
+
+See the [complete batch example](docs/examples/batched-updates.yaml).
+
+Each batch is sent using a parameterized `UPDATE ... FROM (VALUES ...)` join on the
+primary key (including composite keys) or configured row key. Rows sharing the same
+columns to update use one statement. A uniform batch of 200 rows therefore needs one
+update round trip instead of 200. Mixed NULL/empty generator fields can split a batch
+into multiple statements so preserved columns never appear in `SET` for those rows.
+Rows with nothing to update generate no write statement.
+
+- `batchSize` must be positive. `1` limits processing to one row at a time.
+- The effective size is capped by the number of keys and target columns: at most
+  2,000 parameters per SQL Server command (leaving headroom below its 2,100 limit),
+  or 65,535 for PostgreSQL. Large/wide configurations are automatically split.
+- Memory holds at most one effective batch of generated values; the database reader
+  remains streamed. Generation remains sequential, using each row's original values.
+- Progress is reported after each completed chunk, including skipped rows, and the
+  final partial chunk is flushed. Each submitted row must match exactly one updated row.
+- PostgreSQL retains its transaction per table, including rollback on failure or
+  cancellation. SQL Server retains autocommit per statement to avoid holding updater
+  locks across a streamed table read; earlier successful batches remain committed if
+  a later batch fails. Truncation behavior is unchanged.
+- Statement-level triggers now receive multiple rows and must handle them correctly.
+  Use `batchSize: 1` if a trigger requires one-row statements.
+
+The reduction is in SQL commands and network round trips; actual elapsed-time gains
+depend on the database, indexes, triggers, generator cost, and network latency.
+
 ## Static column values
 
 Use `value` instead of `generator` to assign the same literal value to every row:
@@ -455,3 +503,11 @@ docker rm --force --volumes rulemask-engine-test
 - PostgreSQL: [Pagila](https://github.com/devrimgunduz/pagila)
 
 Restore a separate copy before applying any anonymization rules.
+
+### SQL Server batch integration tests
+
+Set `RULEMASK_TEST_SQLSERVER` to a connection string for an explicitly disposable
+SQL Server database and run `dotnet test src/RuleMaskDb/RuleMaskDb.Tests`. The optional
+batch tests create and drop uniquely named tables and verify composite keys, triggers,
+NULL preservation, static values, and 100/200-row chunks. PostgreSQL batch tests use
+the existing `RULEMASK_TEST_POSTGRES` variable.

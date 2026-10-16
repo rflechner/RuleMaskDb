@@ -35,6 +35,76 @@ public sealed class RelationalDriver(DatabaseType databaseType)
         };
     }
 
+    public int GetEffectiveBatchSize(int requestedSize, int parametersPerRow)
+    {
+        if (requestedSize <= 0) throw new ArgumentOutOfRangeException(nameof(requestedSize));
+        if (parametersPerRow <= 0) throw new ArgumentOutOfRangeException(nameof(parametersPerRow));
+        // Leave room for SQL Server's command metadata below the 2,100 parameter limit.
+        var limit = databaseType switch
+        {
+            DatabaseType.SqlServer => 2000,
+            DatabaseType.PostgreSQL => 65535,
+            _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
+        };
+        if (parametersPerRow > limit)
+            throw new InvalidOperationException($"A single update row requires {parametersPerRow} parameters; the supported limit is {limit}.");
+        return Math.Min(requestedSize, limit / parametersPerRow);
+    }
+
+    public DbCommand CreateUpdateBatch(DbConnection connection, TableDescription table,
+        IReadOnlyList<string> keys, IReadOnlyList<string> columns,
+        IReadOnlyList<object?[]> rows, IReadOnlyList<string> dataTypeNames)
+    {
+        var width = keys.Count + columns.Count;
+        if (keys.Count == 0 || columns.Count == 0 || rows.Count == 0
+            || dataTypeNames.Count != width || rows.Any(r => r.Length != width))
+            throw new ArgumentException("An update batch requires keys, columns, and equally sized rows and type metadata.");
+        if (GetEffectiveBatchSize(rows.Count, width) != rows.Count)
+            throw new ArgumentException("Update batch exceeds the parameter budget.");
+
+        var command = connection.CreateCommand();
+        try
+        {
+            var tuples = new List<string>();
+            for (var row = 0; row < rows.Count; row++)
+            {
+                var names = new List<string> { row.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+                for (var column = 0; column < width; column++)
+                {
+                    var name = $"p{row}_{column}";
+                    var parameter = command.CreateParameter();
+                    parameter.ParameterName = name;
+                    parameter.Value = rows[row][column] ?? DBNull.Value;
+                    // VALUES cannot infer the target type when a whole PostgreSQL column is NULL.
+                    if (parameter.Value is DBNull && parameter is NpgsqlParameter postgresParameter)
+                        postgresParameter.DataTypeName = dataTypeNames[column];
+                    command.Parameters.Add(parameter);
+                    names.Add("@" + name);
+                }
+                tuples.Add("(" + string.Join(", ", names) + ")");
+            }
+            var aliases = new[] { "row_index" }.Concat(Enumerable.Range(0, width).Select(i => $"c{i}"));
+            var source = $"(VALUES {string.Join(", ", tuples)}) AS s ({string.Join(", ", aliases.Select(QuoteIdentifier))})";
+            var assignments = columns.Select((column, i) => $"{QuoteIdentifier(column)} = s.{QuoteIdentifier($"c{keys.Count + i}")}");
+            var predicates = keys.Select((key, i) => $"t.{QuoteIdentifier(key)} = s.{QuoteIdentifier($"c{i}")}");
+            var set = string.Join(", ", assignments);
+            var join = string.Join(" AND ", predicates);
+            command.CommandText = databaseType switch
+            {
+                DatabaseType.PostgreSQL => $"UPDATE {QuoteTable(table)} AS t SET {set} FROM {source} WHERE {join} RETURNING s.\"row_index\"",
+                // OUTPUT INTO also supports target tables with enabled UPDATE triggers.
+                DatabaseType.SqlServer => $"DECLARE @updated TABLE ([row_index] int); UPDATE t SET {set} OUTPUT s.[row_index] INTO @updated FROM {QuoteTable(table)} AS t INNER JOIN {source} ON {join}; SELECT [row_index] FROM @updated;",
+                _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
+            };
+            return command;
+        }
+        catch
+        {
+            command.Dispose();
+            throw;
+        }
+    }
+
     public string QuoteTable(TableDescription table)
     {
         if (table.Schema is not null && table.LocalName is not null)

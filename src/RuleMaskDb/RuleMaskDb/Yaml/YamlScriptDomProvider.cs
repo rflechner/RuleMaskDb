@@ -52,11 +52,14 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         foreach (var (table, column) in tableKeys)
             if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
                 throw new InvalidOperationException("tableKeys requires non-empty table and column names.");
-        return new ScriptSpecification(database, rules)
+        var script = new ScriptSpecification(database, rules)
         {
+            BatchSize = doc.BatchSize,
             TableKeys = tableKeys,
             TruncateTables = (doc.TruncateTables ?? []).ToImmutableArray()
         };
+        script.ValidateBatchSize();
+        return script;
     }
 
     private static GeneratorParameter ToParameter(string name, YamlParameter? parameter)
@@ -81,6 +84,7 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
     // Internal DTOs to match the YAML structure without leaking YamlDotNet attributes into domain types
     private sealed class YamlScript
     {
+        public int BatchSize { get; set; } = 200;
         public YamlDatabase? Database { get; set; }
         public List<YamlRule>? Rules { get; set; }
         public List<string>? TruncateTables { get; set; }
