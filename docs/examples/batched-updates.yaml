@@ -1,0 +1,19 @@
+# Use a disposable database copy. Omit batchSize to use 200 rows per chunk.
+# Lower this to 100 for smaller chunks, or 1 for single-row statements.
+# Parameter limits may reduce the effective size automatically.
+batchSize: 100
+
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=Demo;Integrated Security=true;TrustServerCertificate=true;'
+
+rules:
+  - table: dbo.Users
+    column: FirstName
+    generator: FirstName
+  - table: dbo.Users
+    column: LastName
+    generator: LastName
+  - table: dbo.Users
+    column: IsActive
+    value: false

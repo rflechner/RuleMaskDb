@@ -14,6 +14,7 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         var deserializer = new YamlDotNet.Serialization.DeserializerBuilder()
             .WithNamingConvention(YamlDotNet.Serialization.NamingConventions.CamelCaseNamingConvention.Instance)
             .IgnoreUnmatchedProperties()
+            .WithAttemptingUnquotedStringTypeDeserialization()
             .Build();
 
         // Deserialize into internal DTOs matching the YAML schema
@@ -27,11 +28,22 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
 
         // Map rules
         var rules = (doc.Rules ?? Enumerable.Empty<YamlRule>())
-            .Select(r => new Rule(r.Table ?? string.Empty, r.Column ?? string.Empty, r.Mask,
-                string.IsNullOrWhiteSpace(r.Generator) ? null : r.Generator.Trim())
+            .Select(r =>
             {
-                Parameters = (r.Parameters ?? new Dictionary<string, YamlParameter>())
-                    .ToImmutableDictionary(p => p.Key, p => ToParameter(p.Key, p.Value), StringComparer.Ordinal)
+                var rule = new Rule(r.Table ?? string.Empty, r.Column ?? string.Empty, r.Mask,
+                    string.IsNullOrWhiteSpace(r.Generator) ? null : r.Generator.Trim())
+                {
+                    Parameters = (r.Parameters ?? new Dictionary<string, YamlParameter>())
+                        .ToImmutableDictionary(p => p.Key, p => ToParameter(p.Key, p.Value), StringComparer.Ordinal)
+                };
+                if (r.HasValue)
+                {
+                    if (r.Generator is not null || r.Parameters is not null)
+                        throw new InvalidOperationException($"Static value for {rule.Table}.{rule.Column} cannot be combined with generator or parameters.");
+                    rule = rule with { Value = r.Value };
+                }
+                rule.ValidateValue();
+                return rule;
             })
             .ToImmutableArray();
 
@@ -40,11 +52,14 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         foreach (var (table, column) in tableKeys)
             if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
                 throw new InvalidOperationException("tableKeys requires non-empty table and column names.");
-        return new ScriptSpecification(database, rules)
+        var script = new ScriptSpecification(database, rules)
         {
+            BatchSize = doc.BatchSize,
             TableKeys = tableKeys,
             TruncateTables = (doc.TruncateTables ?? []).ToImmutableArray()
         };
+        script.ValidateBatchSize();
+        return script;
     }
 
     private static GeneratorParameter ToParameter(string name, YamlParameter? parameter)
@@ -69,6 +84,7 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
     // Internal DTOs to match the YAML structure without leaking YamlDotNet attributes into domain types
     private sealed class YamlScript
     {
+        public int BatchSize { get; set; } = 200;
         public YamlDatabase? Database { get; set; }
         public List<YamlRule>? Rules { get; set; }
         public List<string>? TruncateTables { get; set; }
@@ -83,6 +99,15 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
 
     private sealed class YamlRule
     {
+        private object? value;
+        public object? Value
+        {
+            get => value;
+            set { this.value = value; HasValue = true; }
+        }
+        [YamlDotNet.Serialization.YamlIgnore]
+        public bool HasValue { get; private set; }
+
         public string? Table { get; set; }
         public string? Column { get; set; }
         public string? Mask { get; set; }

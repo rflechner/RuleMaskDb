@@ -1,0 +1,24 @@
+# Adapt the connection and column names to a disposable copy of your database.
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=Demo;Integrated Security=true;TrustServerCertificate=true;'
+
+rules:
+  - table: dbo.Users
+    column: Email
+    value: 'redacted@example.invalid'
+  - table: dbo.Users
+    column: RetryCount
+    value: 0
+  - table: dbo.Users
+    column: IsActive
+    value: false
+  - table: dbo.Users
+    column: Notes
+    value: ''
+  - table: dbo.Users
+    column: Phone
+    value: null
+  - table: dbo.Users
+    column: FirstName
+    generator: FirstName
