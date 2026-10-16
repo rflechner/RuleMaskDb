@@ -1,0 +1,64 @@
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true'
+
+rules:
+  - table: dbo.Customers
+    column: FirstName
+    generator: Bogus.Name.FirstName
+    parameters:
+      gender:
+        column: GenderCode
+        mapping: { F: Female, M: Male }
+        fallback: Unknown
+      culture:
+        column: CountryCode
+        mapping: { FR: fr-FR, GB: en-GB }
+        fallback: en-US
+
+  - table: dbo.Customers
+    column: Email
+    generator: Bogus.Internet.Email
+    parameters:
+      provider: { value: example.com }
+
+  - table: dbo.Customers
+    column: CreditLimit
+    generator: Bogus.Finance.Amount
+    parameters:
+      min: { value: '100.00' }
+      max: { value: '5000.00' }
+      decimals: { value: '2' }
+
+  - table: dbo.Customers
+    column: Iban
+    generator: Bogus.Finance.Iban
+    parameters:
+      countryCode: { value: FR }
+      formatted: { value: 'true' }
+
+  - table: dbo.Customers
+    column: BirthDate
+    generator: Bogus.Date.Between
+    parameters:
+      start: { value: '1950-01-01T00:00:00Z' }
+      end: { value: '2005-12-31T00:00:00Z' }
+
+  - table: dbo.Customers
+    column: Segment
+    generator: Bogus.Random.ArrayElement
+    parameters:
+      array: { value: '["Retail", "Business", "Partner"]' }
+
+  - table: dbo.Customers
+    column: PhoneNumber
+    generator: Bogus.Phone.PhoneNumber
+    parameters:
+      format: { value: '+33 6 ## ## ## ##' }
+
+  - table: dbo.Customers
+    column: Notes
+    generator: Bogus.Lorem.Paragraph
+    parameters:
+      min: { value: '3' }
+      culture: { value: en-GB }
