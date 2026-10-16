@@ -192,6 +192,26 @@ Scalar results keep database-compatible types. Collections and structured object
 column. APIs requiring C# delegates or application-defined enum types, and Bogus Premium packages,
 are outside this YAML catalog; details and alternatives are in the reference.
 
+### Lorem ipsum example
+
+Replace a free-text column with a randomly generated paragraph:
+
+```yaml
+rules:
+  - table: dbo.Products
+    column: Description
+    generator: Bogus.Lorem.Paragraph
+    parameters:
+      min: { value: '3' }
+```
+
+Here, `min: '3'` produces a paragraph containing **3 to 6 sentences**, not three words.
+For a single sentence, use `Bogus.Lorem.Sentence` with `wordCount`; for multiple paragraphs,
+use `Bogus.Lorem.Paragraphs` with `count`.
+See the [complete Lorem ipsum YAML example](docs/examples/lorem-ipsum.yaml) and
+[argument details](docs/bogus-generators.md#lorem-ipsum).
+The target text column must be large enough; these generators do not impose a character limit.
+
 ## First names, surnames and mapped parameters
 
 Use `FirstName` for a given name, `LastName` for a surname, and `Name` for a full name. Existing `Name` rules keep their meaning; change surname rules explicitly to `LastName`. A surname can naturally contain spaces: `LastName` does not guarantee a single word.

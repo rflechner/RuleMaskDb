@@ -84,6 +84,44 @@ See [the complete example](examples/bogus-generators.yaml) for dates, IBANs, cho
   Qualified methods preserve native locale fallback and gender support. The legacy `FirstName` alias
   retains its explicit check for locales without gender-specific first names.
 
+## Lorem ipsum
+
+Use the [complete Lorem ipsum example](examples/lorem-ipsum.yaml) to replace descriptions,
+summaries and notes with generated placeholder text.
+
+```yaml
+rules:
+  - table: dbo.Products
+    column: Description
+    generator: Bogus.Lorem.Paragraph
+    parameters:
+      min: { value: '3' }
+
+  - table: dbo.Products
+    column: Summary
+    generator: Bogus.Lorem.Sentence
+    parameters:
+      wordCount: { value: '12' }
+      range: { value: '0' }
+
+  - table: dbo.Products
+    column: InternalNotes
+    generator: Bogus.Lorem.Paragraphs
+    parameters:
+      count: { value: '2' }
+      separator: { value: "\n\n" }
+```
+
+The first rule generates a paragraph with 3 to 6 sentences. The second generates one sentence with
+12 words (`range: '0'` adds no extra words). The third generates two paragraphs separated by a blank
+line; YAML double quotes turn `"\n\n"` into two newline characters.
+
+These generators return text directly. `Bogus.Lorem.Words` returns a collection, which RuleMaskDb
+stores as JSON text; use `Sentence` or `Paragraph` for prose.
+The existing `culture` binding can also be supplied, subject to Bogus's locale data and fallback.
+Output length varies and is not a maximum character count; use a sufficiently large text column.
+SQL NULLs and empty strings remain unchanged.
+
 ## Values written to the database
 
 | Bogus result | Database parameter value |

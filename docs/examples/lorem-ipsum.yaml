@@ -1,0 +1,27 @@
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true'
+
+rules:
+  # A paragraph containing between 3 and 6 sentences.
+  - table: dbo.Products
+    column: Description
+    generator: Bogus.Lorem.Paragraph
+    parameters:
+      min: { value: '3' }
+
+  # A sentence containing exactly 12 words.
+  - table: dbo.Products
+    column: Summary
+    generator: Bogus.Lorem.Sentence
+    parameters:
+      wordCount: { value: '12' }
+      range: { value: '0' }
+
+  # Two paragraphs separated by a blank line.
+  - table: dbo.Products
+    column: InternalNotes
+    generator: Bogus.Lorem.Paragraphs
+    parameters:
+      count: { value: '2' }
+      separator: { value: "\n\n" }
