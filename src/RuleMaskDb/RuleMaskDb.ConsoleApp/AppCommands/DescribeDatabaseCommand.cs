@@ -57,7 +57,8 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
                 ? "-"
                 : string.Join('\n', fieldsTexts);
             table.AddRow(
-                new Markup($"[cyan]{Markup.Escape(t.Name)}[/]"),
+                new Markup($"[cyan]{Markup.Escape(t.Name)}[/]"
+                    + (script.TruncateTables.Contains(t.Name) ? " [bold red]TRUNCATE[/]" : "")),
                 new Markup(t.RowCount.ToString("N0")),
                 new Markup(fieldsText));
         }
