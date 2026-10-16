@@ -1,4 +1,4 @@
-﻿using RuleMaskDb.ScriptDom;
+using RuleMaskDb.ScriptDom;
 
 namespace RuleMaskDb.Generators;
 
@@ -16,6 +16,18 @@ public interface IDataGeneratorFactory
 
 public class BogusDataGeneratorFactory : IDataGeneratorFactory
 {
+    public Sdk.IDataGenerator Create(string name)
+    {
+        if (name.StartsWith("Bogus.", StringComparison.OrdinalIgnoreCase))
+        {
+            var entries = BogusGeneratorCatalog.Find(name);
+            return new CultureAwareGenerator(faker => new BogusMethodGenerator(faker, entries));
+        }
+        var match = Enum.GetNames<GeneratorType>().FirstOrDefault(n => n.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (match is null) throw new InvalidOperationException($"Unknown generator: {name}");
+        return Create(Enum.Parse<GeneratorType>(match));
+    }
+
     public IDataGenerator Create(GeneratorType generatorType)
     {
         if (!Enum.IsDefined(generatorType)) throw new ArgumentOutOfRangeException(nameof(generatorType), generatorType, null);

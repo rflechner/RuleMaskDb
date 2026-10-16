@@ -34,6 +34,7 @@ class Program
             config.AddCommand<DescribeDatabaseCommand>("describe");
             config.AddCommand<RunScriptCommand>("run");
             config.AddCommand<ListPluginsCommand>("plugins");
+            config.AddCommand<ListGeneratorsCommand>("generators");
         });
 
         return await app.RunAsync(args);

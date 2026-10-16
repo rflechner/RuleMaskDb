@@ -143,6 +143,55 @@ Safety and scope:
 
 Run against an otherwise idle, non-production copy. The data check is not a new uniqueness constraint and does not prevent concurrent inserts or key changes. Triggers that change key values are also outside this guarantee. The existing one-row affected check and provider transaction behavior remain in effect.
 
+## Bogus generator catalog
+
+Use `Bogus.<Category>.<Method>` to access the installed Bogus data APIs, for example
+`Bogus.Internet.UserName`, `Bogus.Finance.Iban`, `Bogus.Commerce.ProductName`,
+`Bogus.Vehicle.Vin` or `Bogus.Random.Int`. Existing names such as `FirstName`, `Name`,
+`PhoneNumber` and plugin names keep their behavior.
+
+See the [complete catalog and parameter reference](docs/bogus-generators.md) and the
+[complete YAML example](docs/examples/bogus-generators.yaml). The catalog covers all shipped dataset
+families, random values, Person fields and data-generating country extensions in **Bogus 35.6.5**.
+
+```yaml
+rules:
+  - table: dbo.Customers
+    column: Iban
+    generator: Bogus.Finance.Iban
+    parameters:
+      countryCode: { value: FR }
+      formatted: { value: 'true' }
+  - table: dbo.Customers
+    column: CreditLimit
+    generator: Bogus.Finance.Amount
+    parameters:
+      min: { value: '100.00' }
+      max: { value: '5000.00' }
+      decimals: { value: '2' }
+  - table: dbo.Customers
+    column: Segment
+    generator: Bogus.Random.ArrayElement
+    parameters:
+      array: { value: '["Retail", "Business", "Partner"]' }
+```
+
+Arguments use Bogus's parameter names. Each accepts the existing `value` or `column`/`mapping`/`fallback`
+binding. The `culture` parameter remains available for every generator. Missing optional arguments use
+Bogus defaults; missing required arguments and unknown parameter names are rejected. Numbers are parsed
+using invariant culture, enums use names, and collection arguments use JSON encoded as a YAML string.
+
+List available signatures without connecting to a database:
+
+```powershell
+dotnet run --project src/RuleMaskDb/RuleMaskDb.ConsoleApp -- generators
+```
+
+Scalar results keep database-compatible types. Collections and structured objects become JSON text
+(except `byte[]`, which stays binary, and `char[]`, which becomes text). Select an appropriate target
+column. APIs requiring C# delegates or application-defined enum types, and Bogus Premium packages,
+are outside this YAML catalog; details and alternatives are in the reference.
+
 ## First names, surnames and mapped parameters
 
 Use `FirstName` for a given name, `LastName` for a surname, and `Name` for a full name. Existing `Name` rules keep their meaning; change surname rules explicitly to `LastName`. A surname can naturally contain spaces: `LastName` does not guarantee a single word.
