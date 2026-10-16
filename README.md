@@ -63,6 +63,51 @@ PostgreSQL commits each table independently and rolls back the current table on 
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If no generator is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
 
+## Emptying entire tables
+
+Use `truncateTables` to remove **all rows** from selected tables while keeping their schema.
+This works with SQL Server and PostgreSQL and does not require a primary key or a `tableKeys` entry.
+See [the complete YAML example](docs/examples/truncate-tables.yaml).
+
+```yaml
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true'
+
+truncateTables:
+  - dbo.AuditEvents
+  - dbo.UserSessions
+
+rules:
+  - table: dbo.Customers
+    column: FirstName
+    generator: FirstName
+```
+
+For PostgreSQL, use `type: PostgreSQL`, a PostgreSQL connection string and names such as
+`public.audit_events`. Omit `rules` (or set `rules: []`) for a truncate-only script.
+An omitted or empty `truncateTables` list preserves existing behavior.
+
+- Use the exact table names reported by `describe`. That command marks selected tables **TRUNCATE**.
+  Blank, duplicate, missing or ambiguous targets are rejected. A table cannot appear in both
+  `truncateTables` and `rules`.
+- All target/rule validation and configured row-key data checks run before any truncation.
+  The engine then truncates all selected tables in one transaction, before anonymizing other tables.
+  A failure or cancellation before commit rolls back the truncation transaction and stops execution.
+  Once committed, truncations remain effective even if subsequent anonymization fails.
+- Foreign-key constraints are never disabled and `CASCADE` is never requested. PostgreSQL uses one
+  `TRUNCATE TABLE … CONTINUE IDENTITY RESTRICT` statement: include every referencing table explicitly
+  or the database rejects the operation. SQL Server rejects truncation of a table referenced by a
+  foreign key (except a self-reference), even if the referencing table is also listed or empty.
+  There is no automatic fallback to `DELETE`.
+- Native provider semantics apply: SQL Server resets identity counters; PostgreSQL preserves sequences.
+  PostgreSQL also truncates descendants/partitions of selected parent tables.
+  `TRUNCATE` does not fire `DELETE` triggers; PostgreSQL `TRUNCATE` triggers can run.
+  Database permissions and other native truncation restrictions still apply.
+
+Use an otherwise idle, non-production database copy: truncation takes strong table locks and permanently
+removes the selected data once committed.
+
 ## Tables without a primary key
 
 Use the optional top-level `tableKeys` mapping to designate an existing column as the row identifier for a table without a declared primary key:

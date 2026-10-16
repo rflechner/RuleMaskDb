@@ -40,7 +40,11 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         foreach (var (table, column) in tableKeys)
             if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
                 throw new InvalidOperationException("tableKeys requires non-empty table and column names.");
-        return new ScriptSpecification(database, rules) { TableKeys = tableKeys };
+        return new ScriptSpecification(database, rules)
+        {
+            TableKeys = tableKeys,
+            TruncateTables = (doc.TruncateTables ?? []).ToImmutableArray()
+        };
     }
 
     private static GeneratorParameter ToParameter(string name, YamlParameter? parameter)
@@ -67,6 +71,7 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
     {
         public YamlDatabase? Database { get; set; }
         public List<YamlRule>? Rules { get; set; }
+        public List<string>? TruncateTables { get; set; }
         public Dictionary<string, string>? TableKeys { get; set; }
     }
 

@@ -260,6 +260,112 @@ public class PostgreSqlIntegrationTests
             return Task.CompletedTask;
         }
     }
+
+    [Test]
+    public async Task Truncate_only_supports_tables_without_keys_and_preserves_other_tables()
+    {
+        await Execute($"ALTER TABLE {table} DROP CONSTRAINT {driver.QuoteIdentifier("People\" Records_pkey")}");
+        var other = driver.QuoteIdentifier(schema) + ".untargeted";
+        await Execute($"CREATE TABLE {other} (value text); INSERT INTO {other} VALUES ('keep')");
+        var script = (await LoadYaml()) with { Rules = [], TruncateTables = [schema + ".People\" Records"] };
+        await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress());
+        Assert.That(await ReadRows(), Is.Empty);
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"SELECT value FROM {other}", connection);
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo("keep"));
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task Truncate_related_tables_requires_every_referencing_table(bool includeChild)
+    {
+        var child = driver.QuoteIdentifier(schema) + ".events";
+        await Execute($"CREATE TABLE {child} (tenant integer, id integer, FOREIGN KEY (tenant, id) REFERENCES {table}); INSERT INTO {child} VALUES (1, 7)");
+        var script = (await LoadYaml()) with
+        {
+            Rules = [],
+            TruncateTables = includeChild
+                ? [schema + ".People\" Records", schema + ".events"]
+                : [schema + ".People\" Records"]
+        };
+        var runner = new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory());
+        if (includeChild)
+        {
+            await runner.RunAsync(script, new Progress());
+            Assert.That(await ReadRows(), Is.Empty);
+        }
+        else
+        {
+            Assert.ThrowsAsync<PostgresException>(() => runner.RunAsync(script, new Progress()));
+            Assert.That((await ReadRows()).Length, Is.EqualTo(3));
+        }
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"SELECT COUNT(*) FROM {child}", connection);
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo(includeChild ? 0L : 1L));
+    }
+
+    [Test]
+    public async Task Truncate_failure_rolls_back_all_targets()
+    {
+        var rejected = driver.QuoteIdentifier(schema) + ".rejected";
+        await Execute($"""
+            CREATE TABLE {rejected} (value text);
+            INSERT INTO {rejected} VALUES ('keep');
+            CREATE FUNCTION {driver.QuoteIdentifier(schema)}.reject_truncate() RETURNS trigger
+            LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''Truncation rejected''; END';
+            CREATE TRIGGER reject_truncate AFTER TRUNCATE ON {rejected}
+            FOR EACH STATEMENT EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.reject_truncate();
+            """);
+        var script = (await LoadYaml()) with
+        {
+            Rules = [], TruncateTables = [schema + ".People\" Records", schema + ".rejected"]
+        };
+        Assert.ThrowsAsync<PostgresException>(() =>
+            new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress()));
+        Assert.That((await ReadRows()).Length, Is.EqualTo(3));
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"SELECT value FROM {rejected}", connection);
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo("keep"));
+    }
+
+    [Test]
+    public async Task Truncate_preserves_postgresql_identity_and_combines_with_anonymization()
+    {
+        var events = driver.QuoteIdentifier(schema) + ".events";
+        await Execute($"CREATE TABLE {events} (id integer GENERATED ALWAYS AS IDENTITY); INSERT INTO {events} DEFAULT VALUES");
+        var script = (await LoadYaml()) with { TruncateTables = [schema + ".events"] };
+        await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress());
+        Assert.That((await ReadRows())[0], Does.Contain("Fake' first"));
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var count = new NpgsqlCommand($"SELECT COUNT(*) FROM {events}", connection);
+        Assert.That(await count.ExecuteScalarAsync(), Is.EqualTo(0L));
+        await using var insert = new NpgsqlCommand($"INSERT INTO {events} DEFAULT VALUES RETURNING id", connection);
+        Assert.That(await insert.ExecuteScalarAsync(), Is.EqualTo(2));
+    }
+
+    [Test]
+    public async Task Invalid_configured_key_prevents_truncation()
+    {
+        var events = driver.QuoteIdentifier(schema) + ".events";
+        await Execute($"CREATE TABLE {events} (value text); INSERT INTO {events} VALUES ('keep')");
+        await Execute($"ALTER TABLE {table} DROP CONSTRAINT {driver.QuoteIdentifier("People\" Records_pkey")}");
+        var script = (await LoadYaml()) with
+        {
+            TruncateTables = [schema + ".events"],
+            TableKeys = ImmutableDictionary<string, string>.Empty.Add(schema + ".People\" Records", "Tenant")
+        };
+        Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress()));
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"SELECT value FROM {events}", connection);
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo("keep"));
+    }
+
     private async Task<ScriptSpecification> LoadYaml()
     {
         var path = Path.GetTempFileName();

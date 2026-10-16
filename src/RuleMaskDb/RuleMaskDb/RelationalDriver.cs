@@ -22,6 +22,19 @@ public sealed class RelationalDriver(DatabaseType databaseType)
         _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
     };
 
+    public string[] CreateTruncateCommands(IReadOnlyList<TableDescription> tables)
+    {
+        if (tables.Count == 0) return [];
+        var names = tables.Select(QuoteTable).ToArray();
+        return databaseType switch
+        {
+            // One statement allows explicitly selected related tables to be truncated together.
+            DatabaseType.PostgreSQL => [$"TRUNCATE TABLE {string.Join(", ", names)} CONTINUE IDENTITY RESTRICT"],
+            DatabaseType.SqlServer => names.Select(name => $"TRUNCATE TABLE {name}").ToArray(),
+            _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
+        };
+    }
+
     public string QuoteTable(TableDescription table)
     {
         if (table.Schema is not null && table.LocalName is not null)

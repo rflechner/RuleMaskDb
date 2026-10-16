@@ -12,6 +12,21 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         cancellationToken.ThrowIfCancellationRequested();
         var driver = new RelationalDriver(script.Database.DatabaseType);
         var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
+        var truncateTables = new List<TableDescription>();
+        var seenTruncations = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in script.TruncateTables)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                throw new InvalidOperationException("truncateTables requires non-empty table names.");
+            if (!seenTruncations.Add(name))
+                throw new InvalidOperationException($"Duplicate truncateTables entry: {name}");
+            var matches = database.Tables.Where(t => t.Name == name).ToArray();
+            if (matches.Length != 1)
+                throw new InvalidOperationException($"Table target is missing or ambiguous: {name}");
+            if (script.Rules.Any(r => r.Table == name))
+                throw new InvalidOperationException($"Table cannot appear in both truncateTables and rules: {name}");
+            truncateTables.Add(matches[0]);
+        }
         var plans = new List<(TableDescription Table, Rule[] Rules, string[] Keys, Sdk.IDataGenerator[] Generators)>();
         foreach (var (table, column) in script.TableKeys)
         {
@@ -56,6 +71,23 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         // Check all configured keys before any table is updated.
         foreach (var plan in plans.Where(p => script.TableKeys.ContainsKey(p.Table.Name)))
             await ValidateConfiguredKeyAsync(driver, script.Database.ConnectionString, plan.Table, plan.Keys[0], cancellationToken);
+
+        if (truncateTables.Count > 0)
+        {
+            await using var connection = driver.CreateConnection(script.Database.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            foreach (var sql in driver.CreateTruncateCommands(truncateTables))
+            {
+                await using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = sql;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+            foreach (var table in truncateTables)
+                await progressReporter.ReportProgressAsync(table.Name, 1, 1, cancellationToken);
+        }
 
         foreach (var (table, rules, keys, generators) in plans)
         {

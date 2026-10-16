@@ -1,0 +1,18 @@
+# Run only against a disposable or non-production database copy.
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true'
+
+# No primary key is required for these tables.
+truncateTables:
+  - dbo.AuditEvents
+  - dbo.UserSessions
+
+# Omit rules for a truncate-only script.
+rules:
+  - table: dbo.Customers
+    column: FirstName
+    generator: FirstName
+  - table: dbo.Customers
+    column: LastName
+    generator: LastName
