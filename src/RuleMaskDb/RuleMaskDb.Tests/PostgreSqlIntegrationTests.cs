@@ -366,6 +366,80 @@ public class PostgreSqlIntegrationTests
         Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo("keep"));
     }
 
+    [TestCase("redacted' ; --")]
+    [TestCase("")]
+    [TestCase(null)]
+    public async Task Static_values_replace_every_cell_without_creating_generators(string? value)
+    {
+        await Execute($"UPDATE {table} SET \"First.Name\" = '' WHERE \"Tenant\" = 1");
+        var script = await LoadYaml();
+        script = script with
+        {
+            Rules = [new Rule(schema + ".People\" Records", "First.Name", null, (string?)null) { Value = value }]
+        };
+        await new ScriptRunner(new DatabaseAnalyzer(), new RejectingFactory()).RunAsync(script, new Progress());
+        Assert.That(await ReadRows(), Is.EqualTo(new[] {
+            $"1|7|{value}|Smith|keep-1|case-1",
+            $"2|7|{value}|Jones|keep-2|case-2",
+            $"2|8|{value}|Brown|keep-3|case-3" }));
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"SELECT \"First.Name\" FROM {table}", connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            Assert.That(reader.GetValue(0), Is.EqualTo((object?)value ?? DBNull.Value));
+    }
+
+    [Test]
+    public async Task Yaml_static_types_and_generators_can_be_mixed()
+    {
+        await Execute($"ALTER TABLE {table} ADD COLUMN enabled boolean, ADD COLUMN score integer, ADD COLUMN amount numeric");
+        var path = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(path, $"""
+                database:
+                  type: PostgreSQL
+                  connectionString: '{connectionString.Replace("'", "''")}'
+                rules:
+                  - table: '{schema}.People" Records'
+                    column: enabled
+                    value: false
+                  - table: '{schema}.People" Records'
+                    column: score
+                    value: 42
+                  - table: '{schema}.People" Records'
+                    column: amount
+                    value: 12.5
+                  - table: '{schema}.People" Records'
+                    column: First.Name
+                    generator: FirstName
+                """);
+            var script = await new YamlScriptDomProvider(path).LoadScriptAsync();
+            await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress());
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand($"SELECT enabled, score, amount FROM {table}", connection);
+            await using var reader = await command.ExecuteReaderAsync();
+            var count = 0;
+            while (await reader.ReadAsync())
+            {
+                Assert.That(reader.GetBoolean(0), Is.False);
+                Assert.That(reader.GetInt32(1), Is.EqualTo(42));
+                Assert.That(reader.GetDecimal(2), Is.EqualTo(12.5m));
+                count++;
+            }
+            Assert.That(count, Is.EqualTo(3));
+        }
+        finally { File.Delete(path); }
+    }
+
+    private sealed class RejectingFactory : IDataGeneratorFactory
+    {
+        public IDataGenerator Create(GeneratorType type) => throw new AssertionException("Static rules must not create a generator.");
+        public Sdk.IDataGenerator Create(string name) => throw new AssertionException("Static rules must not create a generator.");
+    }
+
     private async Task<ScriptSpecification> LoadYaml()
     {
         var path = Path.GetTempFileName();

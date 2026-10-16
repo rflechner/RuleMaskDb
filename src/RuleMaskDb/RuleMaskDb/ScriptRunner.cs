@@ -27,7 +27,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 throw new InvalidOperationException($"Table cannot appear in both truncateTables and rules: {name}");
             truncateTables.Add(matches[0]);
         }
-        var plans = new List<(TableDescription Table, Rule[] Rules, string[] Keys, Sdk.IDataGenerator[] Generators)>();
+        var plans = new List<(TableDescription Table, Rule[] Rules, string[] Keys, Sdk.IDataGenerator?[] Generators)>();
         foreach (var (table, column) in script.TableKeys)
         {
             if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
@@ -55,6 +55,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 throw new InvalidOperationException($"Duplicate column rules for {table.Name}");
             foreach (var rule in rules)
             {
+                rule.ValidateValue();
                 var field = table.Fields.SingleOrDefault(f => f.Path == rule.Column)
                     ?? throw new InvalidOperationException($"Unknown column: {table.Name}.{rule.Column}");
                 if (field.IsPrimaryKey) throw new InvalidOperationException($"Cannot anonymize primary key: {table.Name}.{field.Path}");
@@ -63,9 +64,10 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             }
             if (keys.Length == 0)
                 throw new InvalidOperationException($"Table has no primary key: {table.Name}. Configure a unique, non-null column in tableKeys.");
-            var generators = rules.Select(r => dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
+            var generators = rules.Select(r => r.HasValue ? null : dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
             for (var i = 0; i < rules.Length; i++)
-                GeneratorParameterResolver.Validate(rules[i], table, generators[i]);
+                if (generators[i] is { } generator)
+                    GeneratorParameterResolver.Validate(rules[i], table, generator);
             plans.Add((table, rules, keys, generators));
         }
         // Check all configured keys before any table is updated.
@@ -118,9 +120,11 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 for (var i = 0; i < generators.Length; i++)
                 {
                     var originalValue = reader.GetValue(keys.Length + i);
-                    if (originalValue is null or DBNull or string { Length: 0 }) continue;
+                    if (!rules[i].HasValue && (originalValue is null or DBNull or string { Length: 0 })) continue;
                     assignments.Add($"{driver.QuoteIdentifier(rules[i].Column)} = @set{i}");
-                    AddParameter(update, $"set{i}", await GeneratorInvocation.GenerateAsync(generators[i], contexts[i], cancellationToken));
+                    AddParameter(update, $"set{i}", rules[i].HasValue
+                        ? BogusValueConverter.ToDatabaseValue(rules[i].Value)
+                        : await GeneratorInvocation.GenerateAsync(generators[i]!, contexts[i], cancellationToken));
                 }
                 if (assignments.Count > 0)
                 {
