@@ -105,6 +105,28 @@ public class PostgreSqlIntegrationTests
         Assert.That(progress.Reports, Is.EqualTo(new[] { (1, 1) }));
     }
 
+    [Test]
+    public async Task Entirely_skipped_batches_report_progress_without_executing_updates()
+    {
+        await Execute($"""
+            DELETE FROM {table};
+            INSERT INTO {table} SELECT 1, n, NULL, '', 'keep', 'case' FROM generate_series(1, 205) n;
+            CREATE FUNCTION {driver.QuoteIdentifier(schema)}.reject_any_update() RETURNS trigger
+            LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''A skipped batch must not execute UPDATE''; END';
+            CREATE TRIGGER reject_any_update BEFORE UPDATE ON {table}
+            FOR EACH STATEMENT EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.reject_any_update();
+            """);
+        var factory = new CountingFactory();
+        var progress = new RecordingProgress();
+        var script = (await LoadYaml()) with { BatchSize = 100 };
+
+        await new ScriptRunner(new DatabaseAnalyzer(), factory).RunAsync(script, progress);
+
+        Assert.That(factory.Calls, Is.Zero);
+        Assert.That(progress.Reports, Is.EqualTo(new[] { (100, 205), (200, 205), (205, 205) }));
+        Assert.That(await ReadRows(), Has.Length.EqualTo(205));
+    }
+
     [TestCase(false)]
     [TestCase(true)]
     public async Task Mapped_parameters_use_original_source_even_when_source_is_anonymized_first(bool staticSource)
