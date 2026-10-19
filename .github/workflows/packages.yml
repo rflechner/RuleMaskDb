@@ -61,7 +61,9 @@ jobs:
     if: github.event_name == 'release'
     needs: package
     runs-on: ubuntu-latest
-    environment: nuget
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/setup-dotnet@v4
         with:
@@ -70,13 +72,10 @@ jobs:
         with:
           name: nuget-packages
           path: artifacts/packages
-      - name: Publish SDK and tool to nuget.org
+      - name: Publish SDK and tool to GitHub Packages
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          if [[ -z "$NUGET_API_KEY" ]]; then
-            echo 'Configure the NUGET_API_KEY secret in the nuget environment or repository.' >&2
-            exit 1
-          fi
-          dotnet nuget push "artifacts/packages/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          dotnet nuget push "artifacts/packages/*.nupkg" --api-key "$GITHUB_TOKEN" --source "https://nuget.pkg.github.com/$owner/index.json" --skip-duplicate --no-symbols
