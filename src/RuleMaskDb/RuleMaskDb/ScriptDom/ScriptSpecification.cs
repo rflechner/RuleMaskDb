@@ -14,6 +14,20 @@ public record ScriptSpecification(DatabaseSpecification Database, ImmutableArray
 
     public ImmutableArray<string> TruncateTables { get; init; } = [];
 
+    public ImmutableDictionary<string, string> BeforeTableSql { get; init; }
+        = ImmutableDictionary<string, string>.Empty;
+
+    public void ValidateBeforeTableSql()
+    {
+        foreach (var (table, sql) in BeforeTableSql)
+        {
+            if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(sql))
+                throw new InvalidOperationException("beforeTableSql requires non-empty table names and SQL scripts.");
+            if (!Rules.Any(rule => rule.Table == table))
+                throw new InvalidOperationException($"beforeTableSql entry has no matching anonymization rule: {table}");
+        }
+    }
+
     public ImmutableDictionary<string, string> TableKeys { get; init; }
         = ImmutableDictionary<string, string>.Empty;
 }

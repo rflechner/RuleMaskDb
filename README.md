@@ -59,7 +59,7 @@ For generator rules, targeted fields containing SQL `NULL` or an empty string (`
 
 All rule targets are validated before writes. Missing tables/columns, duplicate column rules, row-key rules and tables without a usable key fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
 
-PostgreSQL commits each table independently and rolls back the current table on failure or cancellation. Previously committed tables remain changed. SQL Server retains row-by-row autocommit, avoiding a long updater transaction that could block its separate streaming reader. Run against an otherwise idle database copy. Database triggers, constraints and generated columns still apply: incompatible values can fail; triggers can have additional effects.
+PostgreSQL commits each table's anonymization independently and rolls back that anonymization on failure or cancellation. Previously committed tables and successful `beforeTableSql` scripts remain changed. SQL Server uses autocommit per update statement, avoiding a long updater transaction that could block its separate streaming reader. Run against an otherwise idle database copy. Database triggers, constraints and generated columns still apply: incompatible values can fail; triggers can have additional effects.
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If neither `generator` nor `value` is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
 
@@ -143,6 +143,59 @@ See the [complete YAML example](docs/examples/static-values.yaml), which mixes s
 - A static value cannot be combined with `generator`, `mask`, or `parameters` on the same rule.
 - Values are sent as SQL parameters, never interpolated into SQL. They must fit the target column's type, length, nullability, and other constraints. Setting the same value on a unique column may violate its constraint.
 - Primary keys and configured row keys remain protected. The existing row-key requirements apply to static assignments too.
+
+## SQL before anonymizing each table
+
+Use the optional root-level `beforeTableSql` mapping to prepare a table's data before
+its anonymization. Each value is a SQL script; YAML's `|` syntax preserves multiple lines:
+
+```yaml
+beforeTableSql:
+  dbo.Customers: |
+    DELETE FROM [dbo].[Customers] WHERE [IsTestAccount] = 1;
+    UPDATE [dbo].[Customers] SET [FirstName] = 'Unknown' WHERE [FirstName] IS NULL;
+
+rules:
+  - table: dbo.Customers
+    column: FirstName
+    generator: FirstName
+  - table: dbo.Customers
+    column: LastName
+    generator: LastName
+```
+
+See the [complete SQL Server example](docs/examples/before-table-sql.yaml).
+For PostgreSQL, use the same mapping with provider-native SQL, for example:
+
+```yaml
+beforeTableSql:
+  public.people: |
+    UPDATE "public"."people" SET "first_name" = 'Unknown' WHERE "first_name" IS NULL;
+```
+
+- Keys are exact table names from `describe` and must have at least one matching
+  anonymization rule. Empty names/scripts, duplicate YAML keys, unmatched targets,
+  and hooks for truncate-only tables are rejected. Omit the mapping or use `{}`
+  to preserve existing behavior. `describe` never executes these scripts.
+- Tables run in order of their first appearance in `rules`. A script runs **once per
+  table per run**, immediately before reading its rows, even when it is initially empty.
+  Multiple rules or batches do not repeat it. Global `truncateTables` operations run first.
+- Scripts are sent unchanged as a single ADO.NET command, with cancellation support.
+  Use SQL for the selected database; multiple SQL statements are allowed, but client
+  commands such as SQL Server `GO`, `sqlcmd` directives, and psql commands are not.
+  There is no templating or automatic table-name substitution.
+- All rule validation and initial configured-key checks happen before any writes.
+  After a script, its configured row key is checked again and its row count is refreshed
+  for progress. Inserted/changed rows are read with their new values; deleted rows are
+  not anonymized. Filling NULL/empty fields makes them eligible for generators.
+- Each script runs in its **own transaction**, committed before the separate reader
+  starts. An SQL error or cancellation before commit rolls back that script and stops
+  the run. A subsequent anonymization failure does **not** undo a successful script,
+  on either provider. Earlier committed tables and truncations also remain changed.
+- The SQL runs with the configured database account's permissions. Use trusted scripts
+  that modify data in existing tables: schema changes are unsupported because metadata
+  is discovered before execution. Do not include transaction-control commands. Session
+  settings and temporary objects are not shared with the separate reader connection.
 
 ## Emptying entire tables
 

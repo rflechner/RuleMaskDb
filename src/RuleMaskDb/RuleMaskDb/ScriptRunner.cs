@@ -1,3 +1,4 @@
+using System.Data.Common;
 using RuleMaskDb.Generators;
 using RuleMaskDb.ScriptDom;
 using RuleMaskDb.SqlDomain;
@@ -10,6 +11,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
     {
         cancellationToken.ThrowIfCancellationRequested();
         script.ValidateBatchSize();
+        script.ValidateBeforeTableSql();
         var driver = new RelationalDriver(script.Database.DatabaseType);
         var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
         var truncateTables = new List<TableDescription>();
@@ -96,8 +98,16 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         {
             await using var readerConnection = driver.CreateConnection(script.Database.ConnectionString);
             await using var updaterConnection = driver.CreateConnection(script.Database.ConnectionString);
-            await readerConnection.OpenAsync(cancellationToken);
             await updaterConnection.OpenAsync(cancellationToken);
+            var totalStepCount = table.RowCount;
+            var configuredKey = script.TableKeys.ContainsKey(table.Name) ? keys[0] : null;
+            if (script.BeforeTableSql.TryGetValue(table.Name, out var beforeSql))
+                totalStepCount = await ExecuteBeforeTableSqlAsync(driver, updaterConnection, table,
+                    beforeSql, configuredKey, cancellationToken);
+            else if (script.BeforeTableSql.Count > 0 && configuredKey is not null)
+                // An earlier table's SQL may also have changed this table's configured key.
+                await ValidateConfiguredKeyAsync(driver, updaterConnection, null, table, configuredKey, cancellationToken);
+            await readerConnection.OpenAsync(cancellationToken);
             // PostgreSQL MVCC allows a streaming reader alongside a table transaction.
             // Preserve SQL Server autocommit to avoid updater lock escalation blocking the reader.
             await using var transaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
@@ -165,7 +175,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                         throw new InvalidOperationException($"Expected {rows.Length} updated rows in {table.Name}, got {seen.Count}.");
                 }
                 step += buffered;
-                await progressReporter.ReportProgressAsync(table.Name, step, table.RowCount, cancellationToken);
+                await progressReporter.ReportProgressAsync(table.Name, step, totalStepCount, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 pending.Clear();
                 buffered = 0;
@@ -174,12 +184,50 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         }
     }
 
+    private static async Task<int> ExecuteBeforeTableSqlAsync(RelationalDriver driver, DbConnection connection,
+        TableDescription table, string sql, string? configuredKey, CancellationToken cancellationToken)
+    {
+        // Commit before opening the separate streaming reader so it sees these changes
+        // and is not blocked by locks held by the preparation script.
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = sql;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            if (configuredKey is not null)
+                await ValidateConfiguredKeyAsync(driver, connection, transaction, table, configuredKey, cancellationToken);
+            await using var count = connection.CreateCommand();
+            count.Transaction = transaction;
+            count.CommandText = $"SELECT COUNT(*) FROM {driver.QuoteTable(table)}";
+            var rowCount = Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken));
+            cancellationToken.ThrowIfCancellationRequested();
+            await transaction.CommitAsync(cancellationToken);
+            return rowCount;
+        }
+        catch (DbException exception)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new InvalidOperationException($"beforeTableSql failed for table '{table.Name}'.", exception);
+        }
+    }
+
     private static async Task ValidateConfiguredKeyAsync(RelationalDriver driver, string connectionString,
         TableDescription table, string key, CancellationToken cancellationToken)
     {
         await using var connection = driver.CreateConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
+        await ValidateConfiguredKeyAsync(driver, connection, null, table, key, cancellationToken);
+    }
+
+    private static async Task ValidateConfiguredKeyAsync(RelationalDriver driver, DbConnection connection,
+        DbTransaction? transaction, TableDescription table, string key, CancellationToken cancellationToken)
+    {
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         var column = driver.QuoteIdentifier(key);
         // GROUP BY follows the database's own equality/collation semantics, like UPDATE.
         command.CommandText = $"SELECT {column} FROM {driver.QuoteTable(table)} GROUP BY {column} HAVING {column} IS NULL OR COUNT(*) > 1";

@@ -15,6 +15,7 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
             .WithNamingConvention(YamlDotNet.Serialization.NamingConventions.CamelCaseNamingConvention.Instance)
             .IgnoreUnmatchedProperties()
             .WithAttemptingUnquotedStringTypeDeserialization()
+            .WithDuplicateKeyChecking()
             .Build();
 
         // Deserialize into internal DTOs matching the YAML schema
@@ -56,9 +57,12 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         {
             BatchSize = doc.BatchSize,
             TableKeys = tableKeys,
+            BeforeTableSql = (doc.BeforeTableSql ?? new Dictionary<string, string>())
+                .ToImmutableDictionary(StringComparer.Ordinal),
             TruncateTables = (doc.TruncateTables ?? []).ToImmutableArray()
         };
         script.ValidateBatchSize();
+        script.ValidateBeforeTableSql();
         return script;
     }
 
@@ -89,6 +93,7 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         public List<YamlRule>? Rules { get; set; }
         public List<string>? TruncateTables { get; set; }
         public Dictionary<string, string>? TableKeys { get; set; }
+        public Dictionary<string, string>? BeforeTableSql { get; set; }
     }
 
     private sealed class YamlDatabase
