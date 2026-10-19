@@ -55,13 +55,46 @@ Use the exact `schema.table` and column names reported by `describe`, including 
 
 The CLI dispatches schema discovery to the selected provider. A shared ADO.NET runner reads original row keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key, or a configured single-column key when no primary key exists. Only targeted columns appear in `SET`; row keys and untargeted columns are not assigned by the engine.
 
-Targeted fields containing SQL `NULL` or an empty string (`""`) are preserved without calling their generator, including plugin generators. Whitespace-only strings, zero and `false` are still anonymized. Rows with no populated targeted fields are not updated, but still count toward progress. This behavior applies to both SQL Server and PostgreSQL.
+For generator rules, targeted fields containing SQL `NULL` or an empty string (`""`) are preserved without calling their generator, including plugin generators. Whitespace-only strings, zero and `false` are still anonymized. Rows with no populated targeted fields are not updated, but still count toward progress. This behavior applies to both SQL Server and PostgreSQL.
 
 All rule targets are validated before writes. Missing tables/columns, duplicate column rules, row-key rules and tables without a usable key fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
 
 PostgreSQL commits each table independently and rolls back the current table on failure or cancellation. Previously committed tables remain changed. SQL Server retains row-by-row autocommit, avoiding a long updater transaction that could block its separate streaming reader. Run against an otherwise idle database copy. Database triggers, constraints and generated columns still apply: incompatible values can fail; triggers can have additional effects.
 
-Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If no generator is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
+Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If neither `generator` nor `value` is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
+
+## Static column values
+
+Use `value` instead of `generator` to assign the same literal value to every row:
+
+```yaml
+rules:
+  - table: dbo.Users
+    column: Email
+    value: 'redacted@example.invalid'
+  - table: dbo.Users
+    column: RetryCount
+    value: 0
+  - table: dbo.Users
+    column: IsActive
+    value: false
+  - table: dbo.Users
+    column: Notes
+    value: ''
+  - table: dbo.Users
+    column: Phone
+    value: null
+```
+
+See the [complete YAML example](docs/examples/static-values.yaml), which mixes static values and a generator.
+
+- Strings, numbers, booleans, and YAML null are supported. Lists and objects are rejected.
+- Quote values that must remain text, such as `'00123'`, `'true'`, or `'null'`.
+- `value: null` (also `value: ~` or an empty `value:`) writes SQL `NULL`; `value: ''` writes an empty string. Omitting `value` retains generator behavior.
+- Static assignments replace **every targeted cell**, including existing NULL and empty strings. Generator rules continue to preserve those cells.
+- A static value cannot be combined with `generator`, `mask`, or `parameters` on the same rule.
+- Values are sent as SQL parameters, never interpolated into SQL. They must fit the target column's type, length, nullability, and other constraints. Setting the same value on a unique column may violate its constraint.
+- Primary keys and configured row keys remain protected. The existing row-key requirements apply to static assignments too.
 
 ## Emptying entire tables
 
