@@ -85,7 +85,8 @@ public sealed class RelationalDriver(DatabaseType databaseType)
             }
             var aliases = new[] { "row_index" }.Concat(Enumerable.Range(0, width).Select(i => $"c{i}"));
             var source = $"(VALUES {string.Join(", ", tuples)}) AS s ({string.Join(", ", aliases.Select(QuoteIdentifier))})";
-            var assignments = columns.Select((column, i) => $"{QuoteIdentifier(column)} = s.{QuoteIdentifier($"c{keys.Count + i}")}");
+            var assignments = columns.Select((column, i) =>
+                $"{QuoteIdentifier(column)} = {FitColumnValue(table, column, $"s.{QuoteIdentifier($"c{keys.Count + i}")}")}");
             var predicates = keys.Select((key, i) => $"t.{QuoteIdentifier(key)} = s.{QuoteIdentifier($"c{i}")}");
             var set = string.Join(", ", assignments);
             var join = string.Join(" AND ", predicates);
@@ -103,6 +104,27 @@ public sealed class RelationalDriver(DatabaseType databaseType)
             command.Dispose();
             throw;
         }
+    }
+
+    private string FitColumnValue(TableDescription table, string column, string expression)
+    {
+        var field = table.Fields.SingleOrDefault(f => f.Path == column);
+        if (field?.MaxLength is not > 0) return expression;
+        // Only allow known text types: never interpolate a provider-supplied SQL type.
+        var type = (databaseType, field.NativeTypeName) switch
+        {
+            (DatabaseType.SqlServer, "char" or "varchar" or "nchar" or "nvarchar") => field.NativeTypeName,
+            (DatabaseType.PostgreSQL, "varchar") => "varchar",
+            (DatabaseType.PostgreSQL, "bpchar") => "char",
+            _ => null
+        };
+        if (type is null) return expression;
+        // Let the database apply its character/byte semantics. In particular, varchar
+        // must use the destination code page (including UTF-8), not the database default.
+        if (databaseType == DatabaseType.SqlServer && field.Collation is not null)
+            expression += " COLLATE " + QuoteIdentifier(field.Collation);
+        var length = field.MaxLength.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return $"CAST({expression} AS {type}({length}))";
     }
 
     public string QuoteTable(TableDescription table)

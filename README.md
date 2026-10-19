@@ -291,7 +291,7 @@ For a single sentence, use `Bogus.Lorem.Sentence` with `wordCount`; for multiple
 use `Bogus.Lorem.Paragraphs` with `count`.
 See the [complete Lorem ipsum YAML example](docs/examples/lorem-ipsum.yaml) and
 [argument details](docs/bogus-generators.md#lorem-ipsum).
-The target text column must be large enough; these generators do not impose a character limit.
+Generated text is automatically truncated to the target column's declared length when written to SQL Server or PostgreSQL. See [automatic text truncation](#automatic-text-truncation).
 
 ## First names, surnames and mapped parameters
 
@@ -511,3 +511,23 @@ SQL Server database and run `dotnet test src/RuleMaskDb/RuleMaskDb.Tests`. The o
 batch tests create and drop uniquely named tables and verify composite keys, triggers,
 NULL preservation, static values, and 100/200-row chunks. PostgreSQL batch tests use
 the existing `RULEMASK_TEST_POSTGRES` variable.
+
+## Automatic text truncation
+
+Text values longer than the destination column are automatically truncated on the right
+during updates, without additional YAML configuration. This applies to generated values
+(including plugins), static YAML values, and every batch size.
+
+For example, writing `Alexander` to a `varchar(5)` column stores `Alexa`.
+SQL Server `char(n)`, `varchar(n)`, `nchar(n)`, `nvarchar(n)` and PostgreSQL
+`char(n)` / `varchar(n)` use explicit database casts to their declared size.
+SQL Server uses the destination collation/code page, so byte limits and Unicode
+conversion follow the database's semantics. PostgreSQL lengths count characters.
+Unbounded text and `(max)` columns are unchanged. Custom analyzers must supply
+`FieldDescription.NativeTypeName`, `MaxLength`, and SQL Server `Collation`
+to enable this behavior; custom PostgreSQL domains are not handled automatically.
+
+Existing null/empty-value skipping remains unchanged. Row keys are never truncated.
+This does not suppress other database errors or relax constraints: truncation can
+produce duplicate values, and UNIQUE, CHECK and foreign-key violations still fail.
+Numeric overflow and binary values are outside this text-truncation behavior.
