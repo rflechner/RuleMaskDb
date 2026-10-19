@@ -10,31 +10,154 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
     {
         cancellationToken.ThrowIfCancellationRequested();
         script.ValidateBatchSize();
-        var driver = new RelationalDriver(script.Database.DatabaseType);
+        script.ValidateTablesKeys();
+
         var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
-        var truncateTables = new List<TableDescription>();
-        var seenTruncations = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var name in script.TruncateTables)
+        var driver = new RelationalDriver(script.Database.DatabaseType);
+        var plans = await LoadAndValidatePlans(script, cancellationToken, database, driver);
+
+        await TruncateTables(script, progressReporter, database, driver, cancellationToken);
+
+        foreach (var plan in plans)
         {
-            if (string.IsNullOrWhiteSpace(name))
-                throw new InvalidOperationException("truncateTables requires non-empty table names.");
-            if (!seenTruncations.Add(name))
-                throw new InvalidOperationException($"Duplicate truncateTables entry: {name}");
-            var matches = database.Tables.Where(t => t.Name == name).ToArray();
-            if (matches.Length != 1)
-                throw new InvalidOperationException($"Table target is missing or ambiguous: {name}");
-            if (script.Rules.Any(r => r.Table == name))
-                throw new InvalidOperationException($"Table cannot appear in both truncateTables and rules: {name}");
-            truncateTables.Add(matches[0]);
+            // Constants need neither original row values nor a key join. Keep mixed
+            // tables on the batch path to preserve generators' original-row context.
+            if (plan.Rules.All(r => r.HasValue))
+            {
+                await using var connection = driver.CreateConnection(script.Database.ConnectionString);
+                await connection.OpenAsync(cancellationToken);
+                await using var staticTransaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
+                    ? await connection.BeginTransactionAsync(cancellationToken) : null;
+                await using var update = driver.CreateStaticUpdate(connection, plan.Table,
+                    plan.Rules.Select(r => r.Column).ToArray(),
+                    plan.Rules.Select(r => (object?)BogusValueConverter.ToDatabaseValue(r.Value)).ToArray());
+                update.Transaction = staticTransaction;
+                await update.ExecuteNonQueryAsync(cancellationToken);
+                // SQL Server's affected-row count can include trigger writes or be
+                // suppressed by NOCOUNT; use the same metadata total as the batch path.
+                await progressReporter.ReportProgressAsync(plan.Table.Name, plan.Table.RowCount, plan.Table.RowCount, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (staticTransaction is not null) await staticTransaction.CommitAsync(cancellationToken);
+                continue;
+            }
+
+            await using var readerConnection = driver.CreateConnection(script.Database.ConnectionString);
+            await using var updaterConnection = driver.CreateConnection(script.Database.ConnectionString);
+            await readerConnection.OpenAsync(cancellationToken);
+            await updaterConnection.OpenAsync(cancellationToken);
+            // PostgreSQL MVCC allows a streaming reader alongside a table transaction.
+            // Preserve SQL Server autocommit to avoid updater lock escalation blocking the reader.
+            await using var transaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
+                ? await updaterConnection.BeginTransactionAsync(cancellationToken) : null;
+            await using var select = readerConnection.CreateCommand();
+            var columns = plan.Keys.Concat(plan.Rules.Select(r => r.Column))
+                .Concat(plan.Rules.SelectMany(r => r.Parameters.Values.Where(p => p.Column is not null).Select(p => p.Column!)))
+                .Distinct(StringComparer.Ordinal).ToArray();
+            select.CommandText = $"SELECT {string.Join(", ", columns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(plan.Table)}";
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            var batchSize = driver.GetEffectiveBatchSize(script.BatchSize, plan.Keys.Length + plan.Rules.Length);
+            var dataTypeNames = Enumerable.Range(0, plan.Keys.Length + plan.Rules.Length).Select(reader.GetDataTypeName).ToArray();
+            var pending = new List<(int[] Columns, object?[] Values)>();
+            var step = 0;
+            var buffered = 0;
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                // Snapshot dependencies before any generator runs; rule order cannot change their values.
+                var originalValues = columns.Select((column, i) => (column, value: (object?)reader.GetValue(i)))
+                    .ToDictionary(p => p.column, p => p.value, StringComparer.Ordinal);
+                var contexts = plan.Rules.Select(r => GeneratorParameterResolver.Resolve(r, originalValues)).ToArray();
+                var changedColumns = new List<int>();
+                var values = plan.Keys.Select(key => originalValues[key]).ToList();
+                for (var i = 0; i < plan.Generators.Length; i++)
+                {
+                    var originalValue = originalValues[plan.Rules[i].Column];
+                    if (!plan.Rules[i].HasValue && (originalValue is null or DBNull or string { Length: 0 })) continue;
+                    changedColumns.Add(i);
+                    values.Add(plan.Rules[i].HasValue
+                        ? BogusValueConverter.ToDatabaseValue(plan.Rules[i].Value)
+                        : await GeneratorInvocation.GenerateAsync(plan.Generators[i]!, contexts[i], cancellationToken));
+                }
+                if (changedColumns.Count > 0) pending.Add((changedColumns.ToArray(), values.ToArray()));
+                buffered++;
+                if (buffered == batchSize) await FlushAsync();
+            }
+            if (buffered > 0) await FlushAsync();
+
+            async Task FlushAsync()
+            {
+                // A skipped column must not appear in SET, even with its unchanged value:
+                // column-specific triggers should not fire for preserved NULL/empty cells.
+                foreach (var group in pending.GroupBy(row => string.Join(",", row.Columns)))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var indices = group.First().Columns;
+                    var rows = group.Select(row => row.Values).ToArray();
+                    var types = dataTypeNames.Take(plan.Keys.Length)
+                        .Concat(indices.Select(i => dataTypeNames[plan.Keys.Length + i])).ToArray();
+                    await using var update = driver.CreateUpdateBatch(updaterConnection, plan.Table, plan.Keys,
+                        indices.Select(i => plan.Rules[i].Column).ToArray(), rows, types);
+                    update.Transaction = transaction;
+                    await using var updated = await update.ExecuteReaderAsync(cancellationToken);
+                    var seen = new HashSet<int>();
+                    while (await updated.ReadAsync(cancellationToken))
+                    {
+                        var index = updated.GetInt32(0);
+                        if (index < 0 || index >= rows.Length || !seen.Add(index))
+                            throw new InvalidOperationException($"Expected one updated row per batch entry in {plan.Table.Name}.");
+                    }
+                    // Consume completion/errors before accepting OUTPUT/RETURNING results.
+                    while (await updated.NextResultAsync(cancellationToken))
+                        while (await updated.ReadAsync(cancellationToken)) { }
+                    if (seen.Count != rows.Length)
+                        throw new InvalidOperationException($"Expected {rows.Length} updated rows in {plan.Table.Name}, got {seen.Count}.");
+                }
+                step += buffered;
+                await progressReporter.ReportProgressAsync(plan.Table.Name, step, plan.Table.RowCount, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                pending.Clear();
+                buffered = 0;
+            }
+            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
         }
-        var plans = new List<(TableDescription Table, Rule[] Rules, string[] Keys, Sdk.IDataGenerator?[] Generators)>();
-        foreach (var (table, column) in script.TableKeys)
+    }
+
+    private static async Task TruncateTables(ScriptSpecification script, IProgressReporter progressReporter, DatabaseDescription database, RelationalDriver driver, CancellationToken cancellationToken)
+    {
+        var truncateTables = LoadTruncateTables(script, database);
+
+        if (truncateTables.Any())
         {
-            if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
-                throw new InvalidOperationException("tableKeys requires non-empty table and column names.");
-            if (!script.Rules.Any(r => r.Table == table))
-                throw new InvalidOperationException($"tableKeys entry has no matching rule: {table}");
+            await using var connection = driver.CreateConnection(script.Database.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            foreach (var sql in driver.CreateTruncateCommands(truncateTables))
+            {
+                await using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = sql;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+            foreach (var table in truncateTables)
+                await progressReporter.ReportProgressAsync(table.Name, 1, 1, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Loads and validates the table plans based on the given script specification, database description,
+    /// and relational driver. Validates all target rules and configured keys before processing any table updates.
+    /// </summary>
+    /// <param name="script">The script specification containing the database configuration and transformation rules.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <param name="database">The description of the target database including metadata and tables.</param>
+    /// <param name="driver">The relational driver used to interact with the database.</param>
+    /// <returns>A list of validated table plans including rules, keys, and data generators.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when a validation step fails during plan evaluation.</exception>
+    private async Task<List<TablePlan>> LoadAndValidatePlans(ScriptSpecification script, CancellationToken cancellationToken,
+        DatabaseDescription database, RelationalDriver driver)
+    {
+        var plans = new List<TablePlan>();
+
         // Validate every target before making the first change.
         foreach (var group in script.Rules.GroupBy(r => r.Table))
         {
@@ -57,7 +180,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             {
                 rule.ValidateValue();
                 var field = table.Fields.SingleOrDefault(f => f.Path == rule.Column)
-                    ?? throw new InvalidOperationException($"Unknown column: {table.Name}.{rule.Column}");
+                            ?? throw new InvalidOperationException($"Unknown column: {table.Name}.{rule.Column}");
                 if (field.IsPrimaryKey) throw new InvalidOperationException($"Cannot anonymize primary key: {table.Name}.{field.Path}");
                 if (keys.Contains(field.Path))
                     throw new InvalidOperationException($"Cannot anonymize configured row key: {table.Name}.{field.Path}");
@@ -70,130 +193,34 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             for (var i = 0; i < rules.Length; i++)
                 if (generators[i] is { } generator)
                     GeneratorParameterResolver.Validate(rules[i], table, generator);
-            plans.Add((table, rules, keys, generators));
+            plans.Add(new TablePlan(table, rules, keys, generators));
         }
+        
         // Check all configured keys before any table is updated.
         foreach (var plan in plans.Where(p => script.TableKeys.ContainsKey(p.Table.Name)))
             await ValidateConfiguredKeyAsync(driver, script.Database.ConnectionString, plan.Table, plan.Keys[0], cancellationToken);
+        return plans;
+    }
 
-        if (truncateTables.Count > 0)
+    private static List<TableDescription> LoadTruncateTables(ScriptSpecification script, DatabaseDescription database)
+    {
+        var truncateTables = new List<TableDescription>();
+        var seenTruncations = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in script.TruncateTables)
         {
-            await using var connection = driver.CreateConnection(script.Database.ConnectionString);
-            await connection.OpenAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            foreach (var sql in driver.CreateTruncateCommands(truncateTables))
-            {
-                await using var command = connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = sql;
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-            await transaction.CommitAsync(cancellationToken);
-            foreach (var table in truncateTables)
-                await progressReporter.ReportProgressAsync(table.Name, 1, 1, cancellationToken);
+            if (string.IsNullOrWhiteSpace(name))
+                throw new InvalidOperationException("truncateTables requires non-empty table names.");
+            if (!seenTruncations.Add(name))
+                throw new InvalidOperationException($"Duplicate truncateTables entry: {name}");
+            var matches = database.Tables.Where(t => t.Name == name).ToArray();
+            if (matches.Length != 1)
+                throw new InvalidOperationException($"Table target is missing or ambiguous: {name}");
+            if (script.Rules.Any(r => r.Table == name))
+                throw new InvalidOperationException($"Table cannot appear in both truncateTables and rules: {name}");
+            truncateTables.Add(matches[0]);
         }
 
-        foreach (var (table, rules, keys, generators) in plans)
-        {
-            // Constants need neither original row values nor a key join. Keep mixed
-            // tables on the batch path to preserve generators' original-row context.
-            if (rules.All(r => r.HasValue))
-            {
-                await using var connection = driver.CreateConnection(script.Database.ConnectionString);
-                await connection.OpenAsync(cancellationToken);
-                await using var staticTransaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
-                    ? await connection.BeginTransactionAsync(cancellationToken) : null;
-                await using var update = driver.CreateStaticUpdate(connection, table,
-                    rules.Select(r => r.Column).ToArray(),
-                    rules.Select(r => (object?)BogusValueConverter.ToDatabaseValue(r.Value)).ToArray());
-                update.Transaction = staticTransaction;
-                await update.ExecuteNonQueryAsync(cancellationToken);
-                // SQL Server's affected-row count can include trigger writes or be
-                // suppressed by NOCOUNT; use the same metadata total as the batch path.
-                await progressReporter.ReportProgressAsync(table.Name, table.RowCount, table.RowCount, cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (staticTransaction is not null) await staticTransaction.CommitAsync(cancellationToken);
-                continue;
-            }
-
-            await using var readerConnection = driver.CreateConnection(script.Database.ConnectionString);
-            await using var updaterConnection = driver.CreateConnection(script.Database.ConnectionString);
-            await readerConnection.OpenAsync(cancellationToken);
-            await updaterConnection.OpenAsync(cancellationToken);
-            // PostgreSQL MVCC allows a streaming reader alongside a table transaction.
-            // Preserve SQL Server autocommit to avoid updater lock escalation blocking the reader.
-            await using var transaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
-                ? await updaterConnection.BeginTransactionAsync(cancellationToken) : null;
-            await using var select = readerConnection.CreateCommand();
-            var columns = keys.Concat(rules.Select(r => r.Column))
-                .Concat(rules.SelectMany(r => r.Parameters.Values.Where(p => p.Column is not null).Select(p => p.Column!)))
-                .Distinct(StringComparer.Ordinal).ToArray();
-            select.CommandText = $"SELECT {string.Join(", ", columns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
-            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
-            var batchSize = driver.GetEffectiveBatchSize(script.BatchSize, keys.Length + rules.Length);
-            var dataTypeNames = Enumerable.Range(0, keys.Length + rules.Length).Select(reader.GetDataTypeName).ToArray();
-            var pending = new List<(int[] Columns, object?[] Values)>();
-            var step = 0;
-            var buffered = 0;
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                // Snapshot dependencies before any generator runs; rule order cannot change their values.
-                var originalValues = columns.Select((column, i) => (column, value: (object?)reader.GetValue(i)))
-                    .ToDictionary(p => p.column, p => p.value, StringComparer.Ordinal);
-                var contexts = rules.Select(r => GeneratorParameterResolver.Resolve(r, originalValues)).ToArray();
-                var changedColumns = new List<int>();
-                var values = keys.Select(key => originalValues[key]).ToList();
-                for (var i = 0; i < generators.Length; i++)
-                {
-                    var originalValue = originalValues[rules[i].Column];
-                    if (!rules[i].HasValue && (originalValue is null or DBNull or string { Length: 0 })) continue;
-                    changedColumns.Add(i);
-                    values.Add(rules[i].HasValue
-                        ? BogusValueConverter.ToDatabaseValue(rules[i].Value)
-                        : await GeneratorInvocation.GenerateAsync(generators[i]!, contexts[i], cancellationToken));
-                }
-                if (changedColumns.Count > 0) pending.Add((changedColumns.ToArray(), values.ToArray()));
-                buffered++;
-                if (buffered == batchSize) await FlushAsync();
-            }
-            if (buffered > 0) await FlushAsync();
-
-            async Task FlushAsync()
-            {
-                // A skipped column must not appear in SET, even with its unchanged value:
-                // column-specific triggers should not fire for preserved NULL/empty cells.
-                foreach (var group in pending.GroupBy(row => string.Join(",", row.Columns)))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var indices = group.First().Columns;
-                    var rows = group.Select(row => row.Values).ToArray();
-                    var types = dataTypeNames.Take(keys.Length)
-                        .Concat(indices.Select(i => dataTypeNames[keys.Length + i])).ToArray();
-                    await using var update = driver.CreateUpdateBatch(updaterConnection, table, keys,
-                        indices.Select(i => rules[i].Column).ToArray(), rows, types);
-                    update.Transaction = transaction;
-                    await using var updated = await update.ExecuteReaderAsync(cancellationToken);
-                    var seen = new HashSet<int>();
-                    while (await updated.ReadAsync(cancellationToken))
-                    {
-                        var index = updated.GetInt32(0);
-                        if (index < 0 || index >= rows.Length || !seen.Add(index))
-                            throw new InvalidOperationException($"Expected one updated row per batch entry in {table.Name}.");
-                    }
-                    // Consume completion/errors before accepting OUTPUT/RETURNING results.
-                    while (await updated.NextResultAsync(cancellationToken))
-                        while (await updated.ReadAsync(cancellationToken)) { }
-                    if (seen.Count != rows.Length)
-                        throw new InvalidOperationException($"Expected {rows.Length} updated rows in {table.Name}, got {seen.Count}.");
-                }
-                step += buffered;
-                await progressReporter.ReportProgressAsync(table.Name, step, table.RowCount, cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-                pending.Clear();
-                buffered = 0;
-            }
-            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
-        }
+        return truncateTables;
     }
 
     private static async Task ValidateConfiguredKeyAsync(RelationalDriver driver, string connectionString,
