@@ -163,7 +163,7 @@ public class PostgreSqlIntegrationTests
     public async Task Generator_failure_rolls_back_current_table()
     {
         var before = await ReadRows();
-        var script = await LoadYaml();
+        var script = (await LoadYaml()) with { BatchSize = 1 };
         Assert.ThrowsAsync<InvalidOperationException>(async () => await new ScriptRunner(new DatabaseAnalyzer(), new FailingFactory()).RunAsync(script, new Progress()));
         Assert.That(await ReadRows(), Is.EqualTo(before));
     }
@@ -246,7 +246,7 @@ public class PostgreSqlIntegrationTests
     {
         var before = await ReadRows();
         using var source = new CancellationTokenSource();
-        var script = await LoadYaml();
+        var script = (await LoadYaml()) with { BatchSize = 1 };
         Assert.CatchAsync<OperationCanceledException>(async () => await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory())
             .RunAsync(script, new CancellingProgress(source), source.Token));
         Assert.That(await ReadRows(), Is.EqualTo(before));
@@ -432,6 +432,68 @@ public class PostgreSqlIntegrationTests
             Assert.That(count, Is.EqualTo(3));
         }
         finally { File.Delete(path); }
+    }
+
+    [TestCase(1)]
+    [TestCase(100)]
+    [TestCase(200)]
+    public async Task Batches_update_205_rows_in_the_expected_number_of_statements(int batchSize)
+    {
+        var log = driver.QuoteIdentifier(schema) + ".batch_log";
+        await Execute($"""
+            DELETE FROM {table};
+            INSERT INTO {table} SELECT 1, n, 'Alice', 'Smith', 'keep', 'case' FROM generate_series(1, 205) n;
+            CREATE TABLE {log} (id integer GENERATED ALWAYS AS IDENTITY, size integer);
+            CREATE FUNCTION {driver.QuoteIdentifier(schema)}.record_batch() RETURNS trigger LANGUAGE plpgsql AS
+            'BEGIN INSERT INTO {log} (size) SELECT COUNT(*) FROM updated_rows; RETURN NULL; END';
+            CREATE TRIGGER record_batch AFTER UPDATE ON {table}
+            REFERENCING NEW TABLE AS updated_rows FOR EACH STATEMENT
+            EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.record_batch();
+            """);
+        var progress = new RecordingProgress();
+        await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory())
+            .RunAsync((await LoadYaml()) with { BatchSize = batchSize }, progress);
+        var rows = await ReadRows();
+        Assert.That(rows.Length, Is.EqualTo(205));
+        Assert.That(rows.All(row => row.EndsWith("|Fake' first|Fake last|keep|case")), Is.True);
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"SELECT array_agg(size ORDER BY id) FROM {log}", connection);
+        var sizes = Enumerable.Range(0, 205).Chunk(batchSize).Select(chunk => chunk.Length).ToArray();
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo(sizes));
+        Assert.That(progress.Reports.Select(p => p.Step), Is.EqualTo(sizes.Select((_, i) => Math.Min((i + 1) * batchSize, 205))));
+    }
+
+    [Test]
+    public async Task All_null_static_values_support_non_text_target_types()
+    {
+        await Execute($"ALTER TABLE {table} ADD COLUMN enabled boolean, ADD COLUMN score integer, ADD COLUMN external_id uuid, ADD COLUMN created timestamp");
+        var script = (await LoadYaml()) with
+        {
+            Rules = new[] { "enabled", "score", "external_id", "created" }
+                .Select(column => new Rule(schema + ".People\" Records", column, null, (string?)null) { Value = null }).ToImmutableArray()
+        };
+        await new ScriptRunner(new DatabaseAnalyzer(), new RejectingFactory()).RunAsync(script, new Progress());
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"SELECT count(*) FROM {table} WHERE enabled IS NULL AND score IS NULL AND external_id IS NULL AND created IS NULL", connection);
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo(3));
+    }
+
+    [Test]
+    public async Task Missing_batch_row_caused_by_trigger_is_detected_and_rolls_back()
+    {
+        var before = await ReadRows();
+        await Execute($"""
+            CREATE FUNCTION {driver.QuoteIdentifier(schema)}.skip_row() RETURNS trigger LANGUAGE plpgsql AS
+            'BEGIN IF NEW."Tenant" = 1 THEN RETURN NULL; END IF; RETURN NEW; END';
+            CREATE TRIGGER skip_row BEFORE UPDATE ON {table} FOR EACH ROW
+            EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.skip_row();
+            """);
+        var script = await LoadYaml();
+        Assert.ThrowsAsync<InvalidOperationException>(() => new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory())
+            .RunAsync(script, new Progress()));
+        Assert.That(await ReadRows(), Is.EqualTo(before));
     }
 
     private sealed class RejectingFactory : IDataGeneratorFactory
