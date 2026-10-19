@@ -1,3 +1,4 @@
+using TSql160Parser = Microsoft.SqlServer.TransactSql.ScriptDom.TSql160Parser;
 using RuleMaskDb.ScriptDom;
 using RuleMaskDb.SqlDomain;
 
@@ -45,15 +46,51 @@ public class TextTruncationTests
     }
 
     [Test]
-    public void SqlServer_uses_escaped_destination_collation_before_cast()
+    public void SqlServer_collation_batches_have_valid_TSql(
+        [Values("Latin1_General_CI_AS", "SQL_Latin1_General_CP1_CI_AS",
+            "Latin1_General_100_CI_AS_SC", "Latin1_General_100_CI_AS_SC_UTF8")] string collation,
+        [Values("char", "varchar", "nchar", "nvarchar")] string nativeType)
     {
         var field = new FieldDescription("Value", DateType.Text, false)
-            { NativeTypeName = "varchar", MaxLength = 5, Collation = "Latin1_General_100_CI_AS_SC_UTF8" };
+            { NativeTypeName = nativeType, MaxLength = 5, Collation = collation };
         var driver = new RelationalDriver(DatabaseType.SqlServer);
         using var connection = driver.CreateConnection("");
         using var command = driver.CreateUpdateBatch(connection, new("People", 0, [field]),
-            ["Id"], ["Value"], [[1, "ééé"]], ["int", "varchar"]);
+            ["Id"], ["Value"], [[1, "ééé"], [2, null]], ["int", nativeType]);
         Assert.That(command.CommandText,
-            Does.Contain("CAST(s.[c1] COLLATE [Latin1_General_100_CI_AS_SC_UTF8] AS varchar(5))"));
+            Does.Contain($"CAST(s.[c1] COLLATE {collation} AS {nativeType}(5))"));
+        // Parse the whole generated command so invalid syntax cannot be blessed by
+        // a string assertion, even when a live SQL Server is not configured.
+        using var sql = new StringReader(command.CommandText);
+        new TSql160Parser(true).Parse(sql, out var errors);
+        Assert.That(errors, Is.Empty, string.Join(Environment.NewLine, errors.Select(e => e.Message)));
+    }
+
+    [Test]
+    public void Regression_bracketed_collation_is_rejected_by_TSql_parser()
+    {
+        using var sql = new StringReader(
+            "SELECT CAST(N'Alexander' COLLATE [Latin1_General_CI_AS] AS varchar(5));");
+        new TSql160Parser(true).Parse(sql, out var errors);
+        Assert.That(errors, Is.Not.Empty);
+    }
+
+    [TestCase("")]
+    [TestCase(" Latin1_General_CI_AS")]
+    [TestCase("Latin1_General_CI_AS\n")]
+    [TestCase("[Latin1_General_CI_AS]")]
+    [TestCase("Latin1_General_CI_AS; SELECT 1; --")]
+    [TestCase("Latin1_General_CI_AS/**/")]
+    [TestCase("1Latin1_General_CI_AS")]
+    [TestCase("Latín1_General_CI_AS")]
+    public void SqlServer_rejects_invalid_collation_metadata(string collation)
+    {
+        var field = new FieldDescription("Value", DateType.Text, false)
+            { NativeTypeName = "varchar", MaxLength = 5, Collation = collation };
+        var driver = new RelationalDriver(DatabaseType.SqlServer);
+        using var connection = driver.CreateConnection("");
+        Assert.That(() => driver.CreateUpdateBatch(connection, new("People", 0, [field]),
+            ["Id"], ["Value"], [[1, "Alexander"]], ["int", "varchar"]),
+            Throws.InvalidOperationException.With.Message.Contains("collation"));
     }
 }

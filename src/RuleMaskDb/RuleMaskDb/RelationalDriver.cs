@@ -122,7 +122,15 @@ public sealed class RelationalDriver(DatabaseType databaseType)
         // Let the database apply its character/byte semantics. In particular, varchar
         // must use the destination code page (including UTF-8), not the database default.
         if (databaseType == DatabaseType.SqlServer && field.Collation is not null)
-            expression += " COLLATE " + QuoteIdentifier(field.Collation);
+        {
+            // COLLATE requires a bare name, not a bracket-delimited identifier.
+            // Validate custom analyzer metadata before including it in command text.
+            var collation = field.Collation;
+            if (collation.Length is 0 or > 128 || !char.IsAsciiLetter(collation[0])
+                || collation.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '_'))
+                throw new InvalidOperationException($"Invalid SQL Server collation name for column '{column}'.");
+            expression += " COLLATE " + collation;
+        }
         var length = field.MaxLength.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return $"CAST({expression} AS {type}({length}))";
     }
