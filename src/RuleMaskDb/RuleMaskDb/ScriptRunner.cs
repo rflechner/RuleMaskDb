@@ -62,9 +62,10 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 if (keys.Contains(field.Path))
                     throw new InvalidOperationException($"Cannot anonymize configured row key: {table.Name}.{field.Path}");
             }
-            if (keys.Length == 0)
+            var staticOnly = rules.All(r => r.HasValue);
+            if (!staticOnly && keys.Length == 0)
                 throw new InvalidOperationException($"Table has no primary key: {table.Name}. Configure a unique, non-null column in tableKeys.");
-            driver.GetEffectiveBatchSize(script.BatchSize, keys.Length + rules.Length);
+            driver.GetEffectiveBatchSize(script.BatchSize, rules.Length + (staticOnly ? 0 : keys.Length));
             var generators = rules.Select(r => r.HasValue ? null : dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
             for (var i = 0; i < rules.Length; i++)
                 if (generators[i] is { } generator)
@@ -94,6 +95,27 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
 
         foreach (var (table, rules, keys, generators) in plans)
         {
+            // Constants need neither original row values nor a key join. Keep mixed
+            // tables on the batch path to preserve generators' original-row context.
+            if (rules.All(r => r.HasValue))
+            {
+                await using var connection = driver.CreateConnection(script.Database.ConnectionString);
+                await connection.OpenAsync(cancellationToken);
+                await using var staticTransaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
+                    ? await connection.BeginTransactionAsync(cancellationToken) : null;
+                await using var update = driver.CreateStaticUpdate(connection, table,
+                    rules.Select(r => r.Column).ToArray(),
+                    rules.Select(r => (object?)BogusValueConverter.ToDatabaseValue(r.Value)).ToArray());
+                update.Transaction = staticTransaction;
+                await update.ExecuteNonQueryAsync(cancellationToken);
+                // SQL Server's affected-row count can include trigger writes or be
+                // suppressed by NOCOUNT; use the same metadata total as the batch path.
+                await progressReporter.ReportProgressAsync(table.Name, table.RowCount, table.RowCount, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (staticTransaction is not null) await staticTransaction.CommitAsync(cancellationToken);
+                continue;
+            }
+
             await using var readerConnection = driver.CreateConnection(script.Database.ConnectionString);
             await using var updaterConnection = driver.CreateConnection(script.Database.ConnectionString);
             await readerConnection.OpenAsync(cancellationToken);

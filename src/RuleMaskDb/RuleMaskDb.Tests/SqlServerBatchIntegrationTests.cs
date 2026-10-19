@@ -73,6 +73,29 @@ public class SqlServerBatchIntegrationTests
         Assert.That(sizes.Count, Is.LessThanOrEqualTo((int)Math.Ceiling(205d / size) + 2));
     }
 
+    [TestCase(1)]
+    [TestCase(200)]
+    public async Task Static_only_table_uses_one_update_with_enabled_triggers(int batchSize)
+    {
+        var script = new ScriptSpecification(new(DatabaseType.SqlServer, connectionString!),
+            [new Rule("dbo." + name, "Enabled", null, (string?)null) { Value = false },
+             new Rule("dbo." + name, "Score", null, (string?)null) { Value = null }]) { BatchSize = batchSize };
+        await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress());
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var verify = new SqlCommand($"""
+            SELECT COUNT(*) FROM {table} WHERE [Enabled] = 0 AND [Score] IS NULL AND [Untouched] = 'keep';
+            SELECT [Size] FROM {log};
+            """, connection);
+        await using var reader = await verify.ExecuteReaderAsync();
+        Assert.That(await reader.ReadAsync(), Is.True);
+        Assert.That(reader.GetInt32(0), Is.EqualTo(205));
+        Assert.That(await reader.NextResultAsync(), Is.True);
+        Assert.That(await reader.ReadAsync(), Is.True);
+        Assert.That(reader.GetInt32(0), Is.EqualTo(205));
+        Assert.That(await reader.ReadAsync(), Is.False);
+    }
+
     private async Task Execute(string sql)
     {
         await using var connection = new SqlConnection(connectionString);

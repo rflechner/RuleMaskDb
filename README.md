@@ -53,19 +53,19 @@ Use the exact `schema.table` and column names reported by `describe`, including 
 
 ## Engine behavior
 
-The CLI dispatches schema discovery to the selected provider. A shared ADO.NET runner reads original row keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key, or a configured single-column key when no primary key exists. Only targeted columns appear in `SET`; row keys and untargeted columns are not assigned by the engine.
+The CLI dispatches schema discovery to the selected provider. For tables with generator rules, a shared ADO.NET runner reads original row keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key, or a configured single-column key when no primary key exists. Tables whose rules all specify `value` use one parameterized `UPDATE` without a `WHERE` clause or a row reader. Only targeted columns appear in `SET`; row keys and untargeted columns are not assigned by the engine.
 
 For generator rules, targeted fields containing SQL `NULL` or an empty string (`""`) are preserved without calling their generator, including plugin generators. Whitespace-only strings, zero and `false` are still anonymized. Rows with no populated targeted fields are not updated, but still count toward progress. This behavior applies to both SQL Server and PostgreSQL.
 
-All rule targets are validated before writes. Missing tables/columns, duplicate column rules, row-key rules and tables without a usable key fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
+All rule targets are validated before writes. Missing tables/columns, duplicate column rules, row-key rules and tables with generator rules but without a usable key fail explicitly. PostgreSQL discovers ordinary and partitioned tables (partition children are not processed twice), columns and primary keys; row counts are exact and may be expensive on large databases.
 
-PostgreSQL commits each table independently and rolls back the current table on failure or cancellation. Previously committed tables remain changed. SQL Server retains row-by-row autocommit, avoiding a long updater transaction that could block its separate streaming reader. Run against an otherwise idle database copy. Database triggers, constraints and generated columns still apply: incompatible values can fail; triggers can have additional effects.
+PostgreSQL commits each table independently and rolls back the current table on failure or cancellation. Previously committed tables remain changed. SQL Server uses autocommit per update statement, avoiding a long updater transaction that could block its separate streaming reader. Run against an otherwise idle database copy. Database triggers, constraints and generated columns still apply: incompatible values can fail; triggers can have additional effects.
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If neither `generator` nor `value` is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
 
 ## Batched updates
 
-Set the root-level `batchSize` to choose how many rows are read and prepared at a time.
+For tables containing generator rules, set the root-level `batchSize` to choose how many rows are read and prepared at a time.
 The default is **200**; for example, use **100** for smaller batches:
 
 ```yaml
@@ -106,7 +106,8 @@ Rows with nothing to update generate no write statement.
   locks across a streamed table read; earlier successful batches remain committed if
   a later batch fails. Truncation behavior is unchanged.
 - Statement-level triggers now receive multiple rows and must handle them correctly.
-  Use `batchSize: 1` if a trigger requires one-row statements.
+  On this batch path, use `batchSize: 1` if a trigger requires one-row statements.
+  Tables with only static values always use one table-wide statement, regardless of `batchSize`.
 
 The reduction is in SQL commands and network round trips; actual elapsed-time gains
 depend on the database, indexes, triggers, generator cost, and network latency.
@@ -136,13 +137,31 @@ rules:
 
 See the [complete YAML example](docs/examples/static-values.yaml), which mixes static values and a generator.
 
+When **all rules for a table** specify `value`, the engine combines them into one
+parameterized statement, for example:
+
+```sql
+UPDATE [dbo].[Users]
+SET [Email] = @p0, [RetryCount] = @p1, [IsActive] = @p2, [Notes] = @p3, [Phone] = @p4
+```
+
+There is no `WHERE`, key join, or read of the original row values. Parameters are sent
+once per column, and progress is reported once when the update finishes. Schema discovery
+(including row counts) still runs. `batchSize` does not split this update. Statement-level
+triggers receive the whole table at once, and the statement can hold locks longer than a
+single chunk. Database constraints and trigger behavior still apply.
+
+If a table mixes static values with generators, all its rules keep the batch path.
+This preserves original values for generator parameters and applies fixed and generated
+columns together, without a second update pass over the table.
+
 - Strings, numbers, booleans, and YAML null are supported. Lists and objects are rejected.
 - Quote values that must remain text, such as `'00123'`, `'true'`, or `'null'`.
 - `value: null` (also `value: ~` or an empty `value:`) writes SQL `NULL`; `value: ''` writes an empty string. Omitting `value` retains generator behavior.
 - Static assignments replace **every targeted cell**, including existing NULL and empty strings. Generator rules continue to preserve those cells.
 - A static value cannot be combined with `generator`, `mask`, or `parameters` on the same rule.
-- Values are sent as SQL parameters, never interpolated into SQL. They must fit the target column's type, length, nullability, and other constraints. Setting the same value on a unique column may violate its constraint.
-- Primary keys and configured row keys remain protected. The existing row-key requirements apply to static assignments too.
+- Values are sent as SQL parameters, never interpolated into SQL. Automatic text truncation to the destination length also applies to table-wide updates. Values must satisfy the target column's type, nullability, and other constraints. Setting the same value on a unique column may violate its constraint.
+- Primary keys and configured row keys remain protected. A table with only static assignments needs no primary key or `tableKeys` entry. If a key is explicitly configured, it is still validated and protected. Tables containing generators retain the existing row-key requirements.
 
 ## Emptying entire tables
 
@@ -218,7 +237,7 @@ Safety and scope:
 - The column must contain no SQL NULLs and no duplicate values. The engine checks **every configured key before updating any table**, using the database's own grouping/equality/collation semantics. Empty tables pass the data check.
 - Key columns cannot themselves be anonymized. A rule targeting the configured key is rejected, and `describe` does not mark it as impacted.
 - A configured key is only for tables without a primary key. If the table already has one (including a composite primary key), remove its `tableKeys` entry; normal primary-key handling remains unchanged.
-- Missing columns, blank names and entries with no matching rule are errors. Tables without a primary key still fail if no `tableKeys` entry is supplied.
+- Missing columns, blank names and entries with no matching rule are errors. Tables with generator rules and no primary key still fail if no `tableKeys` entry is supplied. Tables with only static assignments do not need a row key.
 - Configured composite keys and automatic UNIQUE-index discovery are not implemented.
 - The key's SQL type must support equality and `GROUP BY`. Checking large tables may require a full scan; an index on the key can improve validation and per-row update performance.
 
