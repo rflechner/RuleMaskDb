@@ -45,10 +45,12 @@ public class TextTruncationIntegrationTests(DatabaseType databaseType)
         if (tableName is not null) await Execute($"DROP TABLE IF EXISTS {table}");
     }
 
-    [TestCase(1)]
-    [TestCase(100)]
-    [TestCase(200)]
-    public async Task Generated_and_static_text_fit_actual_columns_in_all_batches(int batchSize)
+    [TestCase(1, false)]
+    [TestCase(100, false)]
+    [TestCase(200, false)]
+    [TestCase(1, true)]
+    [TestCase(200, true)]
+    public async Task Generated_and_static_text_fit_actual_columns_in_all_batches(int batchSize, bool staticOnly)
     {
         var script = new ScriptSpecification(new(databaseType, connectionString),
         [
@@ -60,6 +62,15 @@ public class TextTruncationIntegrationTests(DatabaseType databaseType)
             new(tableName!, "nullable_value", null, "Name"),
             new(tableName!, "empty_value", null, "Name")
         ]) { BatchSize = batchSize };
+        if (staticOnly)
+            script = script with
+            {
+                Rules = [..script.Rules.Select(r => r.HasValue ? r : r with
+                {
+                    Generator = null,
+                    Value = r.Column == "nullable_value" ? null : r.Column == "empty_value" ? "" : "Alexander"
+                })]
+            };
         var analyzer = new DatabaseAnalyzer();
         var description = await analyzer.DescribeDatabaseAsync(script.Database);
         var fields = description.Tables.Single(t => t.Name == tableName).Fields;

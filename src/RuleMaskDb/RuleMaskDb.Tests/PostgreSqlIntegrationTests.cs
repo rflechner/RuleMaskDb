@@ -105,11 +105,13 @@ public class PostgreSqlIntegrationTests
         Assert.That(progress.Reports, Is.EqualTo(new[] { (1, 1) }));
     }
 
-    [Test]
-    public async Task Mapped_parameters_use_original_source_even_when_source_is_anonymized_first()
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task Mapped_parameters_use_original_source_even_when_source_is_anonymized_first(bool staticSource)
     {
         var script = await LoadYaml();
         var source = new Rule(schema + ".People\" Records", "First.name", null, GeneratorType.Name);
+        if (staticSource) source = source with { Generator = null, Value = "changed" };
         var target = script.Rules[0] with
         {
             Parameters = System.Collections.Immutable.ImmutableDictionary<string, GeneratorParameter>.Empty.Add("gender",
@@ -388,6 +390,71 @@ public class PostgreSqlIntegrationTests
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
             Assert.That(reader.GetValue(0), Is.EqualTo((object?)value ?? DBNull.Value));
+    }
+
+    [TestCase(1, false)]
+    [TestCase(200, false)]
+    [TestCase(1, true)]
+    [TestCase(200, true)]
+    public async Task Static_only_table_uses_one_update_regardless_of_batch_size_or_key(int batchSize, bool withoutKey)
+    {
+        if (withoutKey)
+            await Execute($"ALTER TABLE {table} DROP CONSTRAINT {driver.QuoteIdentifier("People\" Records_pkey")}");
+        var log = driver.QuoteIdentifier(schema) + ".static_log";
+        await Execute($"""
+            DELETE FROM {table};
+            INSERT INTO {table} SELECT 1, n, 'Alice', 'Smith', 'keep', 'case' FROM generate_series(1, 205) n;
+            CREATE TABLE {log} (size integer);
+            CREATE FUNCTION {driver.QuoteIdentifier(schema)}.record_static_update() RETURNS trigger LANGUAGE plpgsql AS
+            'BEGIN INSERT INTO {log} SELECT COUNT(*) FROM updated_rows; RETURN NULL; END';
+            CREATE TRIGGER record_static_update AFTER UPDATE ON {table}
+            REFERENCING NEW TABLE AS updated_rows FOR EACH STATEMENT
+            EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.record_static_update();
+            """);
+        var script = (await LoadYaml()) with
+        {
+            BatchSize = batchSize,
+            Rules = [
+                new Rule(schema + ".People\" Records", "First.Name", null, (string?)null) { Value = "fixed" },
+                new Rule(schema + ".People\" Records", "Last\"Name", null, (string?)null) { Value = null }
+            ]
+        };
+        var progress = new RecordingProgress();
+        await new ScriptRunner(new DatabaseAnalyzer(), new RejectingFactory()).RunAsync(script, progress);
+        var rows = await ReadRows();
+        Assert.That(rows, Has.Length.EqualTo(205));
+        Assert.That(rows.All(r => r.EndsWith("|fixed||keep|case")), Is.True);
+        Assert.That(progress.Reports, Is.EqualTo(new[] { (205, 205) }));
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand($"SELECT array_agg(size) FROM {log}", connection);
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo(new[] { 205 }));
+    }
+
+    [Test]
+    public async Task Cancellation_after_static_update_rolls_back_the_table()
+    {
+        var before = await ReadRows();
+        var script = (await LoadYaml()) with
+        {
+            Rules = [new Rule(schema + ".People\" Records", "First.Name", null, (string?)null) { Value = "fixed" }]
+        };
+        using var source = new CancellationTokenSource();
+        Assert.CatchAsync<OperationCanceledException>(() => new ScriptRunner(new DatabaseAnalyzer(), new RejectingFactory())
+            .RunAsync(script, new CancellingProgress(source), source.Token));
+        Assert.That(await ReadRows(), Is.EqualTo(before));
+    }
+
+    [Test]
+    public async Task Empty_static_only_table_without_key_succeeds()
+    {
+        await Execute($"ALTER TABLE {table} DROP CONSTRAINT {driver.QuoteIdentifier("People\" Records_pkey")}; DELETE FROM {table}");
+        var script = (await LoadYaml()) with
+        {
+            Rules = [new Rule(schema + ".People\" Records", "First.Name", null, (string?)null) { Value = null }]
+        };
+        await new ScriptRunner(new DatabaseAnalyzer(), new RejectingFactory()).RunAsync(script, new Progress());
+        Assert.That(await ReadRows(), Is.Empty);
     }
 
     [Test]

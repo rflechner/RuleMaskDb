@@ -106,6 +106,39 @@ public sealed class RelationalDriver(DatabaseType databaseType)
         }
     }
 
+    public DbCommand CreateStaticUpdate(DbConnection connection, TableDescription table,
+        IReadOnlyList<string> columns, IReadOnlyList<object?> values)
+    {
+        if (columns.Count == 0 || columns.Count != values.Count)
+            throw new ArgumentException("A static update requires columns and an equally sized list of values.");
+        GetEffectiveBatchSize(1, columns.Count);
+
+        var command = connection.CreateCommand();
+        try
+        {
+            var assignments = new List<string>();
+            for (var i = 0; i < columns.Count; i++)
+            {
+                var parameter = command.CreateParameter();
+                parameter.ParameterName = $"p{i}";
+                parameter.Value = values[i] ?? DBNull.Value;
+                // A direct SET assignment lets PostgreSQL infer NULL's type from the
+                // destination column, including types absent from custom metadata.
+                if (parameter.Value is DBNull && parameter is NpgsqlParameter postgresParameter)
+                    postgresParameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Unknown;
+                command.Parameters.Add(parameter);
+                assignments.Add($"{QuoteIdentifier(columns[i])} = {FitColumnValue(table, columns[i], "@" + parameter.ParameterName)}");
+            }
+            command.CommandText = $"UPDATE {QuoteTable(table)} SET {string.Join(", ", assignments)}";
+            return command;
+        }
+        catch
+        {
+            command.Dispose();
+            throw;
+        }
+    }
+
     private string FitColumnValue(TableDescription table, string column, string expression)
     {
         var field = table.Fields.SingleOrDefault(f => f.Path == column);
