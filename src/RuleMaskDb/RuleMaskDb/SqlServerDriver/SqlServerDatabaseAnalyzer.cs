@@ -67,12 +67,14 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
                 columnsByTable[key] = list;
             }
 
-            var isPk = primaryKeysByTable.TryGetValue(key, out var pkCols) && pkCols.Contains(column);
+            int? primaryKeyOrdinal = primaryKeysByTable.TryGetValue(key, out var pkCols)
+                && pkCols.TryGetValue(column, out var ordinal) ? ordinal : null;
             list.Add(new FieldDescription(
                 Path: column,
                 DataType: MapSqlTypeToDateType(dataType),
-                IsPrimaryKey: isPk)
+                IsPrimaryKey: primaryKeyOrdinal is not null)
             {
+                PrimaryKeyOrdinal = primaryKeyOrdinal,
                 NativeTypeName = dataType,
                 MaxLength = r.IsDBNull(4) ? null : r.GetInt32(4),
                 Collation = r.IsDBNull(5) ? null : r.GetString(5)
@@ -82,10 +84,10 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
         return columnsByTable;
     }
 
-    private static async Task<Dictionary<(string Schema, string Name), HashSet<string>>> GetPrimaryKeyColumnsByTable(SqlConnection connection)
+    private static async Task<Dictionary<(string Schema, string Name), Dictionary<string, int>>> GetPrimaryKeyColumnsByTable(SqlConnection connection)
     {
-        var pkByTable = new Dictionary<(string Schema, string Name), HashSet<string>>();
-        const string sql = @"SELECT KU.TABLE_SCHEMA, KU.TABLE_NAME, KU.COLUMN_NAME
+        var pkByTable = new Dictionary<(string Schema, string Name), Dictionary<string, int>>();
+        const string sql = @"SELECT KU.TABLE_SCHEMA, KU.TABLE_NAME, KU.COLUMN_NAME, KU.ORDINAL_POSITION
                               FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS TC
                               INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KU
                                   ON TC.CONSTRAINT_NAME = KU.CONSTRAINT_NAME
@@ -102,12 +104,12 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
             var column = reader.GetString(2);
 
             var key = (schema, table);
-            if (!pkByTable.TryGetValue(key, out var set))
+            if (!pkByTable.TryGetValue(key, out var columns))
             {
-                set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                pkByTable[key] = set;
+                columns = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                pkByTable[key] = columns;
             }
-            set.Add(column);
+            columns.Add(column, reader.GetInt32(3));
         }
 
         return pkByTable;

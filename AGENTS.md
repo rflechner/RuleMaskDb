@@ -21,6 +21,16 @@ These guidelines apply to all code written or modified in this repository.
 - Apply these principles pragmatically; introduce abstractions when they clarify responsibilities or dependencies, and avoid unnecessary complexity.
 - Keep classes and modules focused on a cohesive responsibility.
 
+## Express domain concepts explicitly
+
+- Favor a pragmatic Domain-Driven Design (DDD) approach: use the domain's vocabulary consistently in types, methods, and properties.
+- Represent meaningful concepts with small, focused objects rather than passing raw collections, tuples, or primitives whose meaning callers must reconstruct.
+- Keep invariants, state interpretation, and related behavior inside the object that owns the concept.
+- Expose expressive properties and methods so calling code communicates intent. For example, prefer `page.IsEmpty`, `page.RowCount`, and `page.ContinuationKey` to scattered collection checks and indexing.
+- Make names reflect what is actually known: a full page `RequiresNextPage`; it does not prove that more rows exist.
+- Prefer immutable state and read-only collections where practical, especially for value objects and operation results.
+- Introduce domain objects when they clarify the code; keep them focused and avoid unnecessary architectural layers or abstractions.
+
 ## Keep methods short and focused
 
 - Give each method or function one clear purpose.

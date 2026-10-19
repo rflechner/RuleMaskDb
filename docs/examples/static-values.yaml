@@ -1,4 +1,7 @@
 # Adapt the connection and column names to a disposable copy of your database.
+# Tables with a primary key or tableKeys entry are processed in pages of this size.
+batchSize: 200
+
 database:
   type: SqlServer
   connectionString: 'Server=localhost;Database=Demo;Integrated Security=true;TrustServerCertificate=true;'

@@ -39,11 +39,11 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
     private static async Task RunPlanAsync(ScriptSpecification script, IProgressReporter progressReporter, TablePlan plan,
         RelationalDriver driver, CancellationToken cancellationToken)
     {
-        // Constants need neither original row values nor a key join. Keep mixed
-        // tables on the batch path to preserve generators' original-row context.
+        // Static pages only read row keys. Mixed tables retain the original-row
+        // context required by generators.
         if (plan.HasOnlyStaticValues)
         {
-            await UpdateStaticValues(script, progressReporter, plan, driver, cancellationToken);
+            await new StaticValueUpdater(driver).RunAsync(script, progressReporter, plan, cancellationToken);
             return;
         }
 
@@ -104,19 +104,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 await using var update = driver.CreateUpdateBatch(updaterConnection, plan.Table, plan.Keys,
                     indices.Select(i => plan.Rules[i].Column).ToArray(), rows, types);
                 update.Transaction = transaction;
-                await using var updated = await update.ExecuteReaderAsync(cancellationToken);
-                var seen = new HashSet<int>();
-                while (await updated.ReadAsync(cancellationToken))
-                {
-                    var index = updated.GetInt32(0);
-                    if (index < 0 || index >= rows.Length || !seen.Add(index))
-                        throw new InvalidOperationException($"Expected one updated row per batch entry in {plan.Table.Name}.");
-                }
-                // Consume completion/errors before accepting OUTPUT/RETURNING results.
-                while (await updated.NextResultAsync(cancellationToken))
-                while (await updated.ReadAsync(cancellationToken)) { }
-                if (seen.Count != rows.Length)
-                    throw new InvalidOperationException($"Expected {rows.Length} updated rows in {plan.Table.Name}, got {seen.Count}.");
+                await BatchUpdateExecutor.ExecuteAsync(update, plan.Table.Name, rows.Length, cancellationToken);
             }
             step += buffered;
             await progressReporter.ReportProgressAsync(plan.Table.Name, step, plan.Table.RowCount, cancellationToken);
@@ -125,38 +113,6 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             buffered = 0;
         }
         if (transaction is not null) await transaction.CommitAsync(cancellationToken);
-    }
-
-    /// <summary>
-    /// Updates static column values in the target database table based on the specified table plan.
-    /// Uses transformations defined in the plan rules and commits updates within a transactional context
-    /// if supported by the database type.
-    /// </summary>
-    /// <param name="script">The script specification containing the database configuration and rule definitions.</param>
-    /// <param name="progressReporter">The progress reporter to provide status updates during the operation.</param>
-    /// <param name="plan">The table plan detailing the target table, rules for updating values, and related metadata.</param>
-    /// <param name="driver">The relational driver used for database connections and update execution.</param>
-    /// <param name="cancellationToken">A token to monitor for cancellation requests, allowing graceful termination if signaled.</param>
-    /// <returns>A task that represents the asynchronous operation of updating static values.</returns>
-    /// <exception cref="InvalidOperationException">Thrown when an error occurs during the update execution or rule application.</exception>
-    private static async Task UpdateStaticValues(ScriptSpecification script, IProgressReporter progressReporter, TablePlan plan,
-        RelationalDriver driver, CancellationToken cancellationToken)
-    {
-        await using var connection = driver.CreateConnection(script.Database.ConnectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var staticTransaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
-            ? await connection.BeginTransactionAsync(cancellationToken) : null;
-        await using var update = driver.CreateStaticUpdate(connection, plan.Table,
-            plan.Rules.Select(r => r.Column).ToArray(),
-            plan.Rules.Select(r => (object?)BogusValueConverter.ToDatabaseValue(r.Value)).ToArray());
-        update.Transaction = staticTransaction;
-        await update.ExecuteNonQueryAsync(cancellationToken);
-        // SQL Server's affected-row count can include trigger writes or be
-        // suppressed by NOCOUNT; use the same metadata total as the batch path.
-        await progressReporter.ReportProgressAsync(plan.Table.Name, plan.Table.RowCount, plan.Table.RowCount, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        if (staticTransaction is not null) await staticTransaction.CommitAsync(cancellationToken);
-        return;
     }
 
     private static async Task TruncateTablesAsync(ScriptSpecification script, IProgressReporter progressReporter, DatabaseDescription database, RelationalDriver driver, CancellationToken cancellationToken)
@@ -202,7 +158,8 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             var matches = database.Tables.Where(t => t.Name == group.Key).ToArray();
             if (matches.Length != 1) throw new InvalidOperationException($"Table target is missing or ambiguous: {group.Key}");
             var table = matches[0];
-            var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
+            var keys = table.Fields.Where(f => f.IsPrimaryKey)
+                .OrderBy(f => f.PrimaryKeyOrdinal ?? int.MaxValue).Select(f => f.Path).ToArray();
             if (script.TableKeys.TryGetValue(table.Name, out var configuredKey))
             {
                 if (keys.Length > 0)
@@ -226,7 +183,10 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             var staticOnly = rules.All(r => r.HasValue);
             if (!staticOnly && keys.Length == 0)
                 throw new InvalidOperationException($"Table has no primary key: {table.Name}. Configure a unique, non-null column in tableKeys.");
-            driver.GetEffectiveBatchSize(script.BatchSize, rules.Length + (staticOnly ? 0 : keys.Length));
+            if (staticOnly && keys.Length > 0)
+                driver.GetEffectiveBatchSize(script.BatchSize, keys.Length, rules.Length);
+            else
+                driver.GetEffectiveBatchSize(script.BatchSize, rules.Length + keys.Length);
             var generators = rules.Select(r => r.HasValue ? null : dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
             for (var i = 0; i < rules.Length; i++)
                 if (generators[i] is { } generator)
