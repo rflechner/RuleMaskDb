@@ -15,7 +15,9 @@ public sealed class PostgreSqlDatabaseAnalyzer : IDatabaseAnalyzer
         const string sql = """
             SELECT n.nspname, c.relname, a.attname, t.typname,
                    EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid
-                           AND i.indisprimary AND a.attnum = ANY(i.indkey))
+                           AND i.indisprimary AND a.attnum = ANY(i.indkey)),
+                   CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod >= 4
+                        THEN a.atttypmod - 4 END
             FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
             JOIN pg_attribute a ON a.attrelid = c.oid
@@ -33,7 +35,11 @@ public sealed class PostgreSqlDatabaseAnalyzer : IDatabaseAnalyzer
             {
                 var key = (reader.GetString(0), reader.GetString(1));
                 if (!columns.TryGetValue(key, out var fields)) columns[key] = fields = [];
-                fields.Add(new FieldDescription(reader.GetString(2), MapType(reader.GetString(3)), reader.GetBoolean(4)));
+                fields.Add(new FieldDescription(reader.GetString(2), MapType(reader.GetString(3)), reader.GetBoolean(4))
+                {
+                    NativeTypeName = reader.GetString(3),
+                    MaxLength = reader.IsDBNull(5) ? null : reader.GetInt32(5)
+                });
             }
         }
         var tables = new List<TableDescription>();

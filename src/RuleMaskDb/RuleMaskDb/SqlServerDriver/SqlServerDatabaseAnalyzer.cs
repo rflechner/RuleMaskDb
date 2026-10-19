@@ -48,7 +48,8 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
         var columnsByTable = new Dictionary<(string Schema, string Name), List<FieldDescription>>();
         // Load primary key columns for fast lookup per table
         var primaryKeysByTable = await GetPrimaryKeyColumnsByTable(connection);
-        const string colsSql = @"SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
+        const string colsSql = @"SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE,
+                                        CHARACTER_MAXIMUM_LENGTH, COLLATION_NAME
                                  FROM INFORMATION_SCHEMA.COLUMNS";
         await using var cmdCols = new SqlCommand(colsSql, connection);
         await using var r = await cmdCols.ExecuteReaderAsync();
@@ -70,7 +71,12 @@ public class SqlServerDatabaseAnalyzer : IDatabaseAnalyzer
             list.Add(new FieldDescription(
                 Path: column,
                 DataType: MapSqlTypeToDateType(dataType),
-                IsPrimaryKey: isPk));
+                IsPrimaryKey: isPk)
+            {
+                NativeTypeName = dataType,
+                MaxLength = r.IsDBNull(4) ? null : r.GetInt32(4),
+                Collation = r.IsDBNull(5) ? null : r.GetString(5)
+            });
         }
 
         return columnsByTable;
