@@ -25,4 +25,15 @@ namespace RuleMaskDb;
 /// generators may be used to create synthetic or masked data based on predefined rules.
 /// Null entries indicate no specific generator is associated with the respective column.
 /// </param>
-public record TablePlan(TableDescription Table, Rule[] Rules, string[] Keys, IDataGenerator?[] Generators);
+public record TablePlan(TableDescription Table, Rule[] Rules, string[] Keys, IDataGenerator?[] Generators)
+{
+    /// <summary>
+    /// Indicates whether all rules defined in the table plan have static values.
+    /// </summary>
+    /// <remarks>
+    /// This property evaluates to true if every rule in the <c>Rules</c> collection
+    /// has its <c>HasValue</c> property set to true. It provides a way to determine
+    /// if all rules are fully defined without requiring dynamic or computed values.
+    /// </remarks>
+    public bool HasOnlyStaticValues => Rules.All(r => r.HasValue);
+}
