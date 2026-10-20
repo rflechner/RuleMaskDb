@@ -63,6 +63,26 @@ PostgreSQL commits each table's anonymization independently and rolls back that 
 
 Generators must fit the target column type, length and constraints. Values are normally random; uniqueness and referential consistency for non-PK columns are not guaranteed. `Name` produces a full name. If neither `generator` nor `value` is supplied, `Name` is used. The legacy `mask` property is parsed but is not applied by the engine.
 
+## Execution timing report
+
+After a successful `run`, the CLI prints an execution summary with the total duration
+and one duration per anonymized table, in execution order. Empty tables are included.
+Durations use `hours:minutes:seconds.milliseconds`; hours can exceed 24.
+
+- The total includes schema discovery, validation, global truncation, and table processing.
+  Loading the YAML and rendering the final summary are excluded.
+- Each table's duration includes its `beforeTableSql`, key revalidation, row-count refresh,
+  connection setup, anonymization, and transaction completion.
+- Truncated tables appear together with a shared duration for their transaction.
+  PostgreSQL truncates them in a single statement, so independent per-table timings
+  would be misleading.
+- Total duration can exceed the sum of table durations because discovery and validation
+  happen before table processing. Failed or cancelled runs propagate their error and
+  do not print a successful execution summary.
+
+Library callers receive the same immutable `ScriptExecutionReport` from
+`IScriptRunner.RunAsync`.
+
 ## Batched updates
 
 Set the root-level `batchSize` to choose how many rows are read and prepared at a time.

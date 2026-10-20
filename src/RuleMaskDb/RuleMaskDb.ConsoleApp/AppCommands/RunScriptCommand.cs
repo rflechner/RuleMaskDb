@@ -29,7 +29,7 @@ internal class RunScriptCommand(
 
         AnsiConsole.MarkupLine($"[bold yellow]Running script [bold green]{script.Database.DatabaseType}[/] ... [/]");
         
-        await AnsiConsole.Progress()
+        var report = await AnsiConsole.Progress()
             .AutoRefresh(false)
             .Columns(
                 new TaskDescriptionColumn(), 
@@ -38,10 +38,10 @@ internal class RunScriptCommand(
                 new RemainingTimeColumn(), 
                 new TotalStepsProgressColumn()
             )
-            .StartAsync(async ctx => 
-            {
-                await scriptRunner.RunAsync(script, new ConsoleProgressReporter(ctx), cancellationToken);
-            });
+            .StartAsync(progressContext => scriptRunner.RunAsync(
+                script, new ConsoleProgressReporter(progressContext), cancellationToken));
+
+        new ConsoleExecutionReportWriter(AnsiConsole.Console).Write(report);
         
         return 0;
     }
