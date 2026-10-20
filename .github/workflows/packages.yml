@@ -1,0 +1,81 @@
+name: Packages
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Determine package version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+              echo 'Release tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease.' >&2
+              exit 1
+            fi
+            version="${RELEASE_TAG#v}"
+          else
+            version="0.1.0-ci.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore
+        run: dotnet restore src/RuleMaskDb/RuleMaskDb.slnx
+      - name: Build
+        run: dotnet build src/RuleMaskDb/RuleMaskDb.slnx -c Release --no-restore -p:Version=${{ steps.version.outputs.version }}
+      - name: Test
+        run: dotnet test src/RuleMaskDb/RuleMaskDb.slnx -c Release --no-build --no-restore
+      - name: Pack SDK and tool
+        run: |
+          dotnet pack src/RuleMaskDb/Sdk/Sdk.csproj -c Release --no-build --no-restore -p:Version=${{ steps.version.outputs.version }} -o artifacts/packages
+          dotnet pack src/RuleMaskDb/RuleMaskDb.ConsoleApp/RuleMaskDb.ConsoleApp.csproj -c Release --no-build --no-restore -p:Version=${{ steps.version.outputs.version }} -o artifacts/packages
+      - name: Verify package consumption and plugin discovery
+        run: bash scripts/verify-packages.sh "${{ steps.version.outputs.version }}" artifacts/packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: artifacts/packages/*nupkg
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'release'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuget-packages
+          path: artifacts/packages
+      - name: Publish SDK and tool to GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          dotnet nuget push "artifacts/packages/*.nupkg" --api-key "$GITHUB_TOKEN" --source "https://nuget.pkg.github.com/$owner/index.json" --skip-duplicate --no-symbols

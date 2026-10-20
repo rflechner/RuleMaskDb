@@ -3,6 +3,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <PackageId>RuleMaskDb.Sdk</PackageId>
+    <Description>Dependency-free contracts for RuleMaskDb data generator plugins.</Description>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <AssemblyName>RuleMaskDb.Sdk</AssemblyName>
     <RootNamespace>RuleMaskDb.Sdk</RootNamespace>
   </PropertyGroup>
