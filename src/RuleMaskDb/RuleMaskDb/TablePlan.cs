@@ -28,6 +28,22 @@ namespace RuleMaskDb;
 public record TablePlan(TableDescription Table, Rule[] Rules, string[] Keys, IDataGenerator?[] Generators)
 {
     /// <summary>
+    /// Gets the configured key requiring data validation, or null when no key was configured.
+    /// Database primary keys are enforced by the database and do not need this validation.
+    /// </summary>
+    public string? ConfiguredRowKey { get; init; }
+
+    /// <summary>
+    /// Gets the validated SQL to execute before anonymization, or null when none was supplied.
+    /// </summary>
+    public string? PreparationSql { get; init; }
+
+    /// <summary>
+    /// Returns a plan with the current row count after preparation, preserving its rules and metadata.
+    /// </summary>
+    public TablePlan WithRowCount(int rowCount) => this with { Table = Table with { RowCount = rowCount } };
+
+    /// <summary>
     /// Indicates whether all rules defined in the table plan have static values.
     /// </summary>
     /// <remarks>

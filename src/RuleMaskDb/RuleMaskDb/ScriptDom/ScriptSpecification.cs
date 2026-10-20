@@ -41,6 +41,32 @@ public record ScriptSpecification(DatabaseSpecification Database, ImmutableArray
 
     public ImmutableArray<string> TruncateTables { get; init; } = [];
 
+    /// <summary>
+    /// Maps exact table names to provider-native SQL executed once before their anonymization.
+    /// Each script commits independently; a later anonymization failure does not undo it.
+    /// </summary>
+    public ImmutableDictionary<string, string> BeforeTableSql { get; init; }
+        = ImmutableDictionary<string, string>.Empty;
+
+    /// <summary>
+    /// Ensures preparation scripts are non-empty and target tables with anonymization rules.
+    /// This validation must complete before accessing or modifying the database.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// A table name or script is empty, or a preparation target has no matching rule.
+    /// </exception>
+    public void ValidateBeforeTableSql()
+    {
+        foreach (var (tableName, sql) in BeforeTableSql)
+        {
+            if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(sql))
+                throw new InvalidOperationException("beforeTableSql requires non-empty table names and SQL scripts.");
+
+            if (!Rules.Any(rule => rule.Table == tableName))
+                throw new InvalidOperationException($"beforeTableSql entry has no matching anonymization rule: {tableName}");
+        }
+    }
+
     public ImmutableDictionary<string, string> TableKeys { get; init; }
         = ImmutableDictionary<string, string>.Empty;
 }

@@ -11,16 +11,25 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         cancellationToken.ThrowIfCancellationRequested();
         script.ValidateBatchSize();
         script.ValidateTablesKeys();
+        script.ValidateBeforeTableSql();
 
         var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
         var driver = new RelationalDriver(script.Database.DatabaseType);
+        var truncateTables = LoadTruncateTables(script, database);
         var plans = await LoadAndValidatePlans(script, cancellationToken, database, driver);
 
-        await TruncateTablesAsync(script, progressReporter, database, driver, cancellationToken);
+        await TruncateTablesAsync(script, progressReporter, truncateTables, driver, cancellationToken);
 
         foreach (var plan in plans)
         {
-            await RunPlanAsync(script, progressReporter, plan, driver, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var preparedPlan = script.BeforeTableSql.IsEmpty
+                ? plan
+                : await new TablePreparationExecutor(driver).PrepareAsync(
+                    script.Database.ConnectionString, plan, cancellationToken);
+
+            await RunPlanAsync(script, progressReporter, preparedPlan, driver, cancellationToken);
         }
     }
 
@@ -36,26 +45,25 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         return new GeneratedValueUpdater(driver, plan).RunAsync(script, progressReporter, cancellationToken);
     }
 
-    private static async Task TruncateTablesAsync(ScriptSpecification script, IProgressReporter progressReporter, DatabaseDescription database, RelationalDriver driver, CancellationToken cancellationToken)
+    private static async Task TruncateTablesAsync(ScriptSpecification script, IProgressReporter progressReporter,
+        IReadOnlyList<TableDescription> truncateTables, RelationalDriver driver, CancellationToken cancellationToken)
     {
-        var truncateTables = LoadTruncateTables(script, database);
+        if (truncateTables.Count == 0) return;
 
-        if (truncateTables.Any())
+        await using var connection = driver.CreateConnection(script.Database.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        foreach (var sql in driver.CreateTruncateCommands(truncateTables))
         {
-            await using var connection = driver.CreateConnection(script.Database.ConnectionString);
-            await connection.OpenAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            foreach (var sql in driver.CreateTruncateCommands(truncateTables))
-            {
-                await using var command = connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = sql;
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-            await transaction.CommitAsync(cancellationToken);
-            foreach (var table in truncateTables)
-                await progressReporter.ReportProgressAsync(table.Name, 1, 1, cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = sql;
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        await transaction.CommitAsync(cancellationToken);
+        foreach (var table in truncateTables)
+            await progressReporter.ReportProgressAsync(table.Name, 1, 1, cancellationToken);
     }
 
     /// <summary>
@@ -112,12 +120,18 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             for (var i = 0; i < rules.Length; i++)
                 if (generators[i] is { } generator)
                     GeneratorParameterResolver.Validate(rules[i], table, generator);
-            plans.Add(new TablePlan(table, rules, keys, generators));
+            plans.Add(new TablePlan(table, rules, keys, generators)
+            {
+                ConfiguredRowKey = configuredKey,
+                PreparationSql = script.BeforeTableSql.GetValueOrDefault(table.Name)
+            });
         }
         
         // Check all configured keys before any table is updated.
-        foreach (var plan in plans.Where(p => script.TableKeys.ContainsKey(p.Table.Name)))
-            await ValidateConfiguredKeyAsync(driver, script.Database.ConnectionString, plan.Table, plan.Keys[0], cancellationToken);
+        var keyValidator = new ConfiguredRowKeyValidator(driver);
+        foreach (var plan in plans.Where(plan => plan.ConfiguredRowKey is not null))
+            await keyValidator.ValidateAsync(script.Database.ConnectionString, plan, cancellationToken);
+
         return plans;
     }
 
@@ -140,20 +154,6 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         }
 
         return truncateTables;
-    }
-
-    private static async Task ValidateConfiguredKeyAsync(RelationalDriver driver, string connectionString,
-        TableDescription table, string key, CancellationToken cancellationToken)
-    {
-        await using var connection = driver.CreateConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        var column = driver.QuoteIdentifier(key);
-        // GROUP BY follows the database's own equality/collation semantics, like UPDATE.
-        command.CommandText = $"SELECT {column} FROM {driver.QuoteTable(table)} GROUP BY {column} HAVING {column} IS NULL OR COUNT(*) > 1";
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
-            throw new InvalidOperationException($"Configured row key must be unique and non-null: {table.Name}.{key}");
     }
 
     public Task<bool> IsImpactedAsync(ScriptSpecification script, TableDescription table, FieldDescription field, CancellationToken cancellationToken = default)
