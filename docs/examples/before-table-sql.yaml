@@ -1,0 +1,27 @@
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true;TrustServerCertificate=true;'
+
+# Each block runs once, immediately before reading that table for anonymization.
+# Use SQL for the selected provider. Do not include GO or transaction commands.
+beforeTableSql:
+  dbo.Customers: |
+    DELETE FROM [dbo].[Customers] WHERE [IsTestAccount] = 1;
+    UPDATE [dbo].[Customers]
+    SET [FirstName] = 'Unknown'
+    WHERE [FirstName] IS NULL OR [FirstName] = '';
+  dbo.Orders: |
+    UPDATE [dbo].[Orders] SET [InternalNotes] = NULL;
+
+# Tables run in order of their first appearance in rules:
+# Customers SQL -> Customers anonymization -> Orders SQL -> Orders anonymization.
+rules:
+  - table: dbo.Customers
+    column: FirstName
+    generator: FirstName
+  - table: dbo.Customers
+    column: LastName
+    generator: LastName
+  - table: dbo.Orders
+    column: DeliveryAddress
+    generator: AddressLine
