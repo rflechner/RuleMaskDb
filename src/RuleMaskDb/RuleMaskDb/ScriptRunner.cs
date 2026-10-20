@@ -1,13 +1,26 @@
+using System.Collections.Immutable;
 using RuleMaskDb.Generators;
 using RuleMaskDb.ScriptDom;
 using RuleMaskDb.SqlDomain;
 
 namespace RuleMaskDb;
 
-public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFactory dataGeneratorFactory) : IScriptRunner
+/// <summary>
+/// Validates and executes anonymization scripts and records their completed operation timings.
+/// </summary>
+/// <param name="databaseAnalyzer">Discovers the target database's schema and row counts.</param>
+/// <param name="dataGeneratorFactory">Creates generators for the validated table rules.</param>
+/// <param name="timeProvider">The monotonic timing source, or the system clock when omitted.</param>
+public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFactory dataGeneratorFactory,
+    TimeProvider? timeProvider = null) : IScriptRunner
 {
-    public async Task RunAsync(ScriptSpecification script, IProgressReporter progressReporter, CancellationToken cancellationToken = default)
+    private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+
+    /// <inheritdoc />
+    public async Task<ScriptExecutionReport> RunAsync(ScriptSpecification script, IProgressReporter progressReporter,
+        CancellationToken cancellationToken = default)
     {
+        var startedAt = clock.GetTimestamp();
         cancellationToken.ThrowIfCancellationRequested();
         script.ValidateBatchSize();
         script.ValidateTablesKeys();
@@ -18,19 +31,42 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         var truncateTables = LoadTruncateTables(script, database);
         var plans = await LoadAndValidatePlans(script, cancellationToken, database, driver);
 
-        await TruncateTablesAsync(script, progressReporter, truncateTables, driver, cancellationToken);
+        var truncation = await TruncateWithTimingAsync(script, progressReporter, truncateTables, driver, cancellationToken);
+        var tableTimings = ImmutableArray.CreateBuilder<TableExecutionTiming>(plans.Count);
 
         foreach (var plan in plans)
         {
             cancellationToken.ThrowIfCancellationRequested();
-
-            var preparedPlan = script.BeforeTableSql.IsEmpty
-                ? plan
-                : await new TablePreparationExecutor(driver).PrepareAsync(
-                    script.Database.ConnectionString, plan, cancellationToken);
-
-            await RunPlanAsync(script, progressReporter, preparedPlan, driver, cancellationToken);
+            tableTimings.Add(await RunTableWithTimingAsync(script, progressReporter, plan, driver, cancellationToken));
         }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return new ScriptExecutionReport(clock.GetElapsedTime(startedAt), tableTimings.ToImmutable(), truncation);
+    }
+
+    private async Task<TableExecutionTiming> RunTableWithTimingAsync(ScriptSpecification script,
+        IProgressReporter progressReporter, TablePlan plan, RelationalDriver driver, CancellationToken cancellationToken)
+    {
+        var startedAt = clock.GetTimestamp();
+        var preparedPlan = script.BeforeTableSql.IsEmpty
+            ? plan
+            : await new TablePreparationExecutor(driver).PrepareAsync(
+                script.Database.ConnectionString, plan, cancellationToken);
+
+        await RunPlanAsync(script, progressReporter, preparedPlan, driver, cancellationToken);
+        return new TableExecutionTiming(plan.Table.Name, clock.GetElapsedTime(startedAt));
+    }
+
+    private async Task<TruncationExecutionTiming?> TruncateWithTimingAsync(ScriptSpecification script,
+        IProgressReporter progressReporter, IReadOnlyList<TableDescription> tables, RelationalDriver driver,
+        CancellationToken cancellationToken)
+    {
+        if (tables.Count == 0) return null;
+
+        var startedAt = clock.GetTimestamp();
+        await TruncateTablesAsync(script, progressReporter, tables, driver, cancellationToken);
+        return new TruncationExecutionTiming(
+            tables.Select(table => table.Name).ToImmutableArray(), clock.GetElapsedTime(startedAt));
     }
 
     /// <summary>

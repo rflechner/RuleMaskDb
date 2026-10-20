@@ -29,7 +29,6 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
 
         var table = new Table()
             .Title($"Database [bold yellow]{Markup.Escape(databaseDescription.Name)}[/]")
-            .Centered()
             .Border(TableBorder.Rounded)
             .BorderColor(Color.Grey54);
 
@@ -63,7 +62,7 @@ internal class DescribeDatabaseCommand(IDatabaseAnalyzer databaseAnalyzer, IScri
                 new Markup(fieldsText));
         }
 
-        AnsiConsole.Write(table);
+        AnsiConsole.Write(Align.Center(table));
 
         return 0;
     }
