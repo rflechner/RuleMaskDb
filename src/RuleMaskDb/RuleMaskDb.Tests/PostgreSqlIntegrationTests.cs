@@ -105,6 +105,28 @@ public class PostgreSqlIntegrationTests
         Assert.That(progress.Reports, Is.EqualTo(new[] { (1, 1) }));
     }
 
+    [Test]
+    public async Task Entirely_skipped_batches_report_progress_without_executing_updates()
+    {
+        await Execute($"""
+            DELETE FROM {table};
+            INSERT INTO {table} SELECT 1, n, NULL, '', 'keep', 'case' FROM generate_series(1, 205) n;
+            CREATE FUNCTION {driver.QuoteIdentifier(schema)}.reject_any_update() RETURNS trigger
+            LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''A skipped batch must not execute UPDATE''; END';
+            CREATE TRIGGER reject_any_update BEFORE UPDATE ON {table}
+            FOR EACH STATEMENT EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.reject_any_update();
+            """);
+        var factory = new CountingFactory();
+        var progress = new RecordingProgress();
+        var script = (await LoadYaml()) with { BatchSize = 100 };
+
+        await new ScriptRunner(new DatabaseAnalyzer(), factory).RunAsync(script, progress);
+
+        Assert.That(factory.Calls, Is.Zero);
+        Assert.That(progress.Reports, Is.EqualTo(new[] { (100, 205), (200, 205), (205, 205) }));
+        Assert.That(await ReadRows(), Has.Length.EqualTo(205));
+    }
+
     [TestCase(false)]
     [TestCase(true)]
     public async Task Mapped_parameters_use_original_source_even_when_source_is_anonymized_first(bool staticSource)
@@ -393,20 +415,21 @@ public class PostgreSqlIntegrationTests
     }
 
     [TestCase(1, false)]
+    [TestCase(100, false)]
     [TestCase(200, false)]
     [TestCase(1, true)]
     [TestCase(200, true)]
-    public async Task Static_only_table_uses_one_update_regardless_of_batch_size_or_key(int batchSize, bool withoutKey)
+    public async Task Static_only_table_pages_with_keys_and_retains_keyless_updates(int batchSize, bool withoutKey)
     {
         if (withoutKey)
             await Execute($"ALTER TABLE {table} DROP CONSTRAINT {driver.QuoteIdentifier("People\" Records_pkey")}");
         var log = driver.QuoteIdentifier(schema) + ".static_log";
         await Execute($"""
             DELETE FROM {table};
-            INSERT INTO {table} SELECT 1, n, 'Alice', 'Smith', 'keep', 'case' FROM generate_series(1, 205) n;
-            CREATE TABLE {log} (size integer);
+            INSERT INTO {table} SELECT n % 3, n, 'Alice', 'Smith', 'keep', 'case' FROM generate_series(1, 205) n;
+            CREATE TABLE {log} (id serial, size integer);
             CREATE FUNCTION {driver.QuoteIdentifier(schema)}.record_static_update() RETURNS trigger LANGUAGE plpgsql AS
-            'BEGIN INSERT INTO {log} SELECT COUNT(*) FROM updated_rows; RETURN NULL; END';
+            'BEGIN INSERT INTO {log} (size) SELECT COUNT(*) FROM updated_rows; RETURN NULL; END';
             CREATE TRIGGER record_static_update AFTER UPDATE ON {table}
             REFERENCING NEW TABLE AS updated_rows FOR EACH STATEMENT
             EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.record_static_update();
@@ -424,11 +447,13 @@ public class PostgreSqlIntegrationTests
         var rows = await ReadRows();
         Assert.That(rows, Has.Length.EqualTo(205));
         Assert.That(rows.All(r => r.EndsWith("|fixed||keep|case")), Is.True);
-        Assert.That(progress.Reports, Is.EqualTo(new[] { (205, 205) }));
+        var effectiveSize = withoutKey ? 205 : batchSize;
+        var sizes = Enumerable.Range(0, 205).Chunk(effectiveSize).Select(chunk => chunk.Length).ToArray();
+        Assert.That(progress.Reports, Is.EqualTo(sizes.Select((_, i) => (Math.Min((i + 1) * effectiveSize, 205), 205))));
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
-        await using var command = new NpgsqlCommand($"SELECT array_agg(size) FROM {log}", connection);
-        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo(new[] { 205 }));
+        await using var command = new NpgsqlCommand($"SELECT array_agg(size ORDER BY id) FROM {log}", connection);
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo(sizes));
     }
 
     [Test]
@@ -437,6 +462,7 @@ public class PostgreSqlIntegrationTests
         var before = await ReadRows();
         var script = (await LoadYaml()) with
         {
+            BatchSize = 1,
             Rules = [new Rule(schema + ".People\" Records", "First.Name", null, (string?)null) { Value = "fixed" }]
         };
         using var source = new CancellationTokenSource();
@@ -547,8 +573,9 @@ public class PostgreSqlIntegrationTests
         Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo(3));
     }
 
-    [Test]
-    public async Task Missing_batch_row_caused_by_trigger_is_detected_and_rolls_back()
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task Missing_batch_row_caused_by_trigger_is_detected_and_rolls_back(bool staticOnly)
     {
         var before = await ReadRows();
         await Execute($"""
@@ -558,6 +585,11 @@ public class PostgreSqlIntegrationTests
             EXECUTE FUNCTION {driver.QuoteIdentifier(schema)}.skip_row();
             """);
         var script = await LoadYaml();
+        if (staticOnly)
+            script = script with
+            {
+                Rules = [new Rule(schema + ".People\" Records", "First.Name", null, (string?)null) { Value = "fixed" }]
+            };
         Assert.ThrowsAsync<InvalidOperationException>(() => new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory())
             .RunAsync(script, new Progress()));
         Assert.That(await ReadRows(), Is.EqualTo(before));

@@ -10,73 +10,37 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
     {
         cancellationToken.ThrowIfCancellationRequested();
         script.ValidateBatchSize();
-        var driver = new RelationalDriver(script.Database.DatabaseType);
-        var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
-        var truncateTables = new List<TableDescription>();
-        var seenTruncations = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var name in script.TruncateTables)
-        {
-            if (string.IsNullOrWhiteSpace(name))
-                throw new InvalidOperationException("truncateTables requires non-empty table names.");
-            if (!seenTruncations.Add(name))
-                throw new InvalidOperationException($"Duplicate truncateTables entry: {name}");
-            var matches = database.Tables.Where(t => t.Name == name).ToArray();
-            if (matches.Length != 1)
-                throw new InvalidOperationException($"Table target is missing or ambiguous: {name}");
-            if (script.Rules.Any(r => r.Table == name))
-                throw new InvalidOperationException($"Table cannot appear in both truncateTables and rules: {name}");
-            truncateTables.Add(matches[0]);
-        }
-        var plans = new List<(TableDescription Table, Rule[] Rules, string[] Keys, Sdk.IDataGenerator?[] Generators)>();
-        foreach (var (table, column) in script.TableKeys)
-        {
-            if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
-                throw new InvalidOperationException("tableKeys requires non-empty table and column names.");
-            if (!script.Rules.Any(r => r.Table == table))
-                throw new InvalidOperationException($"tableKeys entry has no matching rule: {table}");
-        }
-        // Validate every target before making the first change.
-        foreach (var group in script.Rules.GroupBy(r => r.Table))
-        {
-            var matches = database.Tables.Where(t => t.Name == group.Key).ToArray();
-            if (matches.Length != 1) throw new InvalidOperationException($"Table target is missing or ambiguous: {group.Key}");
-            var table = matches[0];
-            var keys = table.Fields.Where(f => f.IsPrimaryKey).Select(f => f.Path).ToArray();
-            if (script.TableKeys.TryGetValue(table.Name, out var configuredKey))
-            {
-                if (keys.Length > 0)
-                    throw new InvalidOperationException($"Table already has a primary key: {table.Name}. Remove its tableKeys entry.");
-                if (!table.Fields.Any(f => f.Path == configuredKey))
-                    throw new InvalidOperationException($"Unknown configured row key: {table.Name}.{configuredKey}");
-                keys = [configuredKey];
-            }
-            var rules = group.ToArray();
-            if (rules.Select(r => r.Column).Distinct().Count() != rules.Length)
-                throw new InvalidOperationException($"Duplicate column rules for {table.Name}");
-            foreach (var rule in rules)
-            {
-                rule.ValidateValue();
-                var field = table.Fields.SingleOrDefault(f => f.Path == rule.Column)
-                    ?? throw new InvalidOperationException($"Unknown column: {table.Name}.{rule.Column}");
-                if (field.IsPrimaryKey) throw new InvalidOperationException($"Cannot anonymize primary key: {table.Name}.{field.Path}");
-                if (keys.Contains(field.Path))
-                    throw new InvalidOperationException($"Cannot anonymize configured row key: {table.Name}.{field.Path}");
-            }
-            var staticOnly = rules.All(r => r.HasValue);
-            if (!staticOnly && keys.Length == 0)
-                throw new InvalidOperationException($"Table has no primary key: {table.Name}. Configure a unique, non-null column in tableKeys.");
-            driver.GetEffectiveBatchSize(script.BatchSize, rules.Length + (staticOnly ? 0 : keys.Length));
-            var generators = rules.Select(r => r.HasValue ? null : dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
-            for (var i = 0; i < rules.Length; i++)
-                if (generators[i] is { } generator)
-                    GeneratorParameterResolver.Validate(rules[i], table, generator);
-            plans.Add((table, rules, keys, generators));
-        }
-        // Check all configured keys before any table is updated.
-        foreach (var plan in plans.Where(p => script.TableKeys.ContainsKey(p.Table.Name)))
-            await ValidateConfiguredKeyAsync(driver, script.Database.ConnectionString, plan.Table, plan.Keys[0], cancellationToken);
+        script.ValidateTablesKeys();
 
-        if (truncateTables.Count > 0)
+        var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
+        var driver = new RelationalDriver(script.Database.DatabaseType);
+        var plans = await LoadAndValidatePlans(script, cancellationToken, database, driver);
+
+        await TruncateTablesAsync(script, progressReporter, database, driver, cancellationToken);
+
+        foreach (var plan in plans)
+        {
+            await RunPlanAsync(script, progressReporter, plan, driver, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Selects key-only updates for static plans and original-row batches for plans containing generators.
+    /// </summary>
+    private static Task RunPlanAsync(ScriptSpecification script, IProgressReporter progressReporter, TablePlan plan,
+        RelationalDriver driver, CancellationToken cancellationToken)
+    {
+        if (plan.HasOnlyStaticValues)
+            return new StaticValueUpdater(driver).RunAsync(script, progressReporter, plan, cancellationToken);
+
+        return new GeneratedValueUpdater(driver, plan).RunAsync(script, progressReporter, cancellationToken);
+    }
+
+    private static async Task TruncateTablesAsync(ScriptSpecification script, IProgressReporter progressReporter, DatabaseDescription database, RelationalDriver driver, CancellationToken cancellationToken)
+    {
+        var truncateTables = LoadTruncateTables(script, database);
+
+        if (truncateTables.Any())
         {
             await using var connection = driver.CreateConnection(script.Database.ConnectionString);
             await connection.OpenAsync(cancellationToken);
@@ -92,108 +56,90 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             foreach (var table in truncateTables)
                 await progressReporter.ReportProgressAsync(table.Name, 1, 1, cancellationToken);
         }
+    }
 
-        foreach (var (table, rules, keys, generators) in plans)
+    /// <summary>
+    /// Loads and validates the table plans based on the given script specification, database description,
+    /// and relational driver. Validates all target rules and configured keys before processing any table updates.
+    /// </summary>
+    /// <param name="script">The script specification containing the database configuration and transformation rules.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <param name="database">The description of the target database including metadata and tables.</param>
+    /// <param name="driver">The relational driver used to interact with the database.</param>
+    /// <returns>A list of validated table plans including rules, keys, and data generators.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when a validation step fails during plan evaluation.</exception>
+    private async Task<List<TablePlan>> LoadAndValidatePlans(ScriptSpecification script, CancellationToken cancellationToken,
+        DatabaseDescription database, RelationalDriver driver)
+    {
+        var plans = new List<TablePlan>();
+
+        // Validate every target before making the first change.
+        foreach (var group in script.Rules.GroupBy(r => r.Table))
         {
-            // Constants need neither original row values nor a key join. Keep mixed
-            // tables on the batch path to preserve generators' original-row context.
-            if (rules.All(r => r.HasValue))
+            var matches = database.Tables.Where(t => t.Name == group.Key).ToArray();
+            if (matches.Length != 1) throw new InvalidOperationException($"Table target is missing or ambiguous: {group.Key}");
+            var table = matches[0];
+            var keys = table.Fields.Where(f => f.IsPrimaryKey)
+                .OrderBy(f => f.PrimaryKeyOrdinal ?? int.MaxValue).Select(f => f.Path).ToArray();
+            if (script.TableKeys.TryGetValue(table.Name, out var configuredKey))
             {
-                await using var connection = driver.CreateConnection(script.Database.ConnectionString);
-                await connection.OpenAsync(cancellationToken);
-                await using var staticTransaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
-                    ? await connection.BeginTransactionAsync(cancellationToken) : null;
-                await using var update = driver.CreateStaticUpdate(connection, table,
-                    rules.Select(r => r.Column).ToArray(),
-                    rules.Select(r => (object?)BogusValueConverter.ToDatabaseValue(r.Value)).ToArray());
-                update.Transaction = staticTransaction;
-                await update.ExecuteNonQueryAsync(cancellationToken);
-                // SQL Server's affected-row count can include trigger writes or be
-                // suppressed by NOCOUNT; use the same metadata total as the batch path.
-                await progressReporter.ReportProgressAsync(table.Name, table.RowCount, table.RowCount, cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-                if (staticTransaction is not null) await staticTransaction.CommitAsync(cancellationToken);
-                continue;
+                if (keys.Length > 0)
+                    throw new InvalidOperationException($"Table already has a primary key: {table.Name}. Remove its tableKeys entry.");
+                if (!table.Fields.Any(f => f.Path == configuredKey))
+                    throw new InvalidOperationException($"Unknown configured row key: {table.Name}.{configuredKey}");
+                keys = [configuredKey];
             }
-
-            await using var readerConnection = driver.CreateConnection(script.Database.ConnectionString);
-            await using var updaterConnection = driver.CreateConnection(script.Database.ConnectionString);
-            await readerConnection.OpenAsync(cancellationToken);
-            await updaterConnection.OpenAsync(cancellationToken);
-            // PostgreSQL MVCC allows a streaming reader alongside a table transaction.
-            // Preserve SQL Server autocommit to avoid updater lock escalation blocking the reader.
-            await using var transaction = script.Database.DatabaseType == DatabaseType.PostgreSQL
-                ? await updaterConnection.BeginTransactionAsync(cancellationToken) : null;
-            await using var select = readerConnection.CreateCommand();
-            var columns = keys.Concat(rules.Select(r => r.Column))
-                .Concat(rules.SelectMany(r => r.Parameters.Values.Where(p => p.Column is not null).Select(p => p.Column!)))
-                .Distinct(StringComparer.Ordinal).ToArray();
-            select.CommandText = $"SELECT {string.Join(", ", columns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(table)}";
-            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
-            var batchSize = driver.GetEffectiveBatchSize(script.BatchSize, keys.Length + rules.Length);
-            var dataTypeNames = Enumerable.Range(0, keys.Length + rules.Length).Select(reader.GetDataTypeName).ToArray();
-            var pending = new List<(int[] Columns, object?[] Values)>();
-            var step = 0;
-            var buffered = 0;
-            while (await reader.ReadAsync(cancellationToken))
+            var rules = group.ToArray();
+            if (rules.Select(r => r.Column).Distinct().Count() != rules.Length)
+                throw new InvalidOperationException($"Duplicate column rules for {table.Name}");
+            foreach (var rule in rules)
             {
-                // Snapshot dependencies before any generator runs; rule order cannot change their values.
-                var originalValues = columns.Select((column, i) => (column, value: (object?)reader.GetValue(i)))
-                    .ToDictionary(p => p.column, p => p.value, StringComparer.Ordinal);
-                var contexts = rules.Select(r => GeneratorParameterResolver.Resolve(r, originalValues)).ToArray();
-                var changedColumns = new List<int>();
-                var values = keys.Select(key => originalValues[key]).ToList();
-                for (var i = 0; i < generators.Length; i++)
-                {
-                    var originalValue = originalValues[rules[i].Column];
-                    if (!rules[i].HasValue && (originalValue is null or DBNull or string { Length: 0 })) continue;
-                    changedColumns.Add(i);
-                    values.Add(rules[i].HasValue
-                        ? BogusValueConverter.ToDatabaseValue(rules[i].Value)
-                        : await GeneratorInvocation.GenerateAsync(generators[i]!, contexts[i], cancellationToken));
-                }
-                if (changedColumns.Count > 0) pending.Add((changedColumns.ToArray(), values.ToArray()));
-                buffered++;
-                if (buffered == batchSize) await FlushAsync();
+                rule.ValidateValue();
+                var field = table.Fields.SingleOrDefault(f => f.Path == rule.Column)
+                            ?? throw new InvalidOperationException($"Unknown column: {table.Name}.{rule.Column}");
+                if (field.IsPrimaryKey) throw new InvalidOperationException($"Cannot anonymize primary key: {table.Name}.{field.Path}");
+                if (keys.Contains(field.Path))
+                    throw new InvalidOperationException($"Cannot anonymize configured row key: {table.Name}.{field.Path}");
             }
-            if (buffered > 0) await FlushAsync();
-
-            async Task FlushAsync()
-            {
-                // A skipped column must not appear in SET, even with its unchanged value:
-                // column-specific triggers should not fire for preserved NULL/empty cells.
-                foreach (var group in pending.GroupBy(row => string.Join(",", row.Columns)))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var indices = group.First().Columns;
-                    var rows = group.Select(row => row.Values).ToArray();
-                    var types = dataTypeNames.Take(keys.Length)
-                        .Concat(indices.Select(i => dataTypeNames[keys.Length + i])).ToArray();
-                    await using var update = driver.CreateUpdateBatch(updaterConnection, table, keys,
-                        indices.Select(i => rules[i].Column).ToArray(), rows, types);
-                    update.Transaction = transaction;
-                    await using var updated = await update.ExecuteReaderAsync(cancellationToken);
-                    var seen = new HashSet<int>();
-                    while (await updated.ReadAsync(cancellationToken))
-                    {
-                        var index = updated.GetInt32(0);
-                        if (index < 0 || index >= rows.Length || !seen.Add(index))
-                            throw new InvalidOperationException($"Expected one updated row per batch entry in {table.Name}.");
-                    }
-                    // Consume completion/errors before accepting OUTPUT/RETURNING results.
-                    while (await updated.NextResultAsync(cancellationToken))
-                        while (await updated.ReadAsync(cancellationToken)) { }
-                    if (seen.Count != rows.Length)
-                        throw new InvalidOperationException($"Expected {rows.Length} updated rows in {table.Name}, got {seen.Count}.");
-                }
-                step += buffered;
-                await progressReporter.ReportProgressAsync(table.Name, step, table.RowCount, cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-                pending.Clear();
-                buffered = 0;
-            }
-            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+            var staticOnly = rules.All(r => r.HasValue);
+            if (!staticOnly && keys.Length == 0)
+                throw new InvalidOperationException($"Table has no primary key: {table.Name}. Configure a unique, non-null column in tableKeys.");
+            if (staticOnly && keys.Length > 0)
+                driver.GetEffectiveBatchSize(script.BatchSize, keys.Length, rules.Length);
+            else
+                driver.GetEffectiveBatchSize(script.BatchSize, rules.Length + keys.Length);
+            var generators = rules.Select(r => r.HasValue ? null : dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
+            for (var i = 0; i < rules.Length; i++)
+                if (generators[i] is { } generator)
+                    GeneratorParameterResolver.Validate(rules[i], table, generator);
+            plans.Add(new TablePlan(table, rules, keys, generators));
         }
+        
+        // Check all configured keys before any table is updated.
+        foreach (var plan in plans.Where(p => script.TableKeys.ContainsKey(p.Table.Name)))
+            await ValidateConfiguredKeyAsync(driver, script.Database.ConnectionString, plan.Table, plan.Keys[0], cancellationToken);
+        return plans;
+    }
+
+    private static List<TableDescription> LoadTruncateTables(ScriptSpecification script, DatabaseDescription database)
+    {
+        var truncateTables = new List<TableDescription>();
+        var seenTruncations = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in script.TruncateTables)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                throw new InvalidOperationException("truncateTables requires non-empty table names.");
+            if (!seenTruncations.Add(name))
+                throw new InvalidOperationException($"Duplicate truncateTables entry: {name}");
+            var matches = database.Tables.Where(t => t.Name == name).ToArray();
+            if (matches.Length != 1)
+                throw new InvalidOperationException($"Table target is missing or ambiguous: {name}");
+            if (script.Rules.Any(r => r.Table == name))
+                throw new InvalidOperationException($"Table cannot appear in both truncateTables and rules: {name}");
+            truncateTables.Add(matches[0]);
+        }
+
+        return truncateTables;
     }
 
     private static async Task ValidateConfiguredKeyAsync(RelationalDriver driver, string connectionString,

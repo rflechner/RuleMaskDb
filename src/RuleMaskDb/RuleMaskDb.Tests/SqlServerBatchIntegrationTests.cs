@@ -74,26 +74,46 @@ public class SqlServerBatchIntegrationTests
     }
 
     [TestCase(1)]
+    [TestCase(100)]
     [TestCase(200)]
-    public async Task Static_only_table_uses_one_update_with_enabled_triggers(int batchSize)
+    public async Task Static_only_table_pages_composite_keys_with_enabled_triggers(int batchSize)
     {
+        await Execute($"UPDATE {table} SET [Tenant] = [Id] % 3; DELETE FROM {log};");
         var script = new ScriptSpecification(new(DatabaseType.SqlServer, connectionString!),
             [new Rule("dbo." + name, "Enabled", null, (string?)null) { Value = false },
              new Rule("dbo." + name, "Score", null, (string?)null) { Value = null }]) { BatchSize = batchSize };
-        await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, new Progress());
+        var progress = new RecordingProgress();
+        await new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory()).RunAsync(script, progress);
         await using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync();
         await using var verify = new SqlCommand($"""
             SELECT COUNT(*) FROM {table} WHERE [Enabled] = 0 AND [Score] IS NULL AND [Untouched] = 'keep';
-            SELECT [Size] FROM {log};
+            SELECT [Size] FROM {log} ORDER BY [Sequence];
             """, connection);
         await using var reader = await verify.ExecuteReaderAsync();
         Assert.That(await reader.ReadAsync(), Is.True);
         Assert.That(reader.GetInt32(0), Is.EqualTo(205));
         Assert.That(await reader.NextResultAsync(), Is.True);
-        Assert.That(await reader.ReadAsync(), Is.True);
-        Assert.That(reader.GetInt32(0), Is.EqualTo(205));
-        Assert.That(await reader.ReadAsync(), Is.False);
+        var sizes = new List<int>();
+        while (await reader.ReadAsync()) sizes.Add(reader.GetInt32(0));
+        var expected = Enumerable.Range(0, 205).Chunk(batchSize).Select(chunk => chunk.Length).ToArray();
+        Assert.That(sizes, Is.EqualTo(expected));
+        Assert.That(progress.Steps, Is.EqualTo(expected.Select((_, i) => Math.Min((i + 1) * batchSize, 205))));
+    }
+
+    [Test]
+    public async Task Cancellation_after_static_page_keeps_only_the_committed_page()
+    {
+        var script = new ScriptSpecification(new(DatabaseType.SqlServer, connectionString!),
+            [new Rule("dbo." + name, "Enabled", null, (string?)null) { Value = false }]) { BatchSize = 100 };
+        using var source = new CancellationTokenSource();
+        Assert.CatchAsync<OperationCanceledException>(() => new ScriptRunner(new DatabaseAnalyzer(), new FixedFactory())
+            .RunAsync(script, new CancellingProgress(source), source.Token));
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new SqlCommand($"SELECT COUNT(*) FROM {table} WHERE [Enabled] = 0", connection);
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo(100));
     }
 
     private async Task Execute(string sql)
@@ -112,5 +132,24 @@ public class SqlServerBatchIntegrationTests
     private sealed class Progress : IProgressReporter
     {
         public Task ReportProgressAsync(string tableName, int step, int totalStepCount, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class RecordingProgress : IProgressReporter
+    {
+        public List<int> Steps { get; } = [];
+        public Task ReportProgressAsync(string tableName, int step, int totalStepCount, CancellationToken cancellationToken = default)
+        {
+            Steps.Add(step);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CancellingProgress(CancellationTokenSource source) : IProgressReporter
+    {
+        public Task ReportProgressAsync(string tableName, int step, int totalStepCount, CancellationToken cancellationToken = default)
+        {
+            source.Cancel();
+            return Task.CompletedTask;
+        }
     }
 }

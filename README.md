@@ -53,7 +53,7 @@ Use the exact `schema.table` and column names reported by `describe`, including 
 
 ## Engine behavior
 
-The CLI dispatches schema discovery to the selected provider. For tables with generator rules, a shared ADO.NET runner reads original row keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key, or a configured single-column key when no primary key exists. Tables whose rules all specify `value` use one parameterized `UPDATE` without a `WHERE` clause or a row reader. Only targeted columns appear in `SET`; row keys and untargeted columns are not assigned by the engine.
+The CLI dispatches schema discovery to the selected provider. For tables with generator rules, a shared ADO.NET runner reads original row keys and targeted values, generates replacement values and issues parameterized updates using every component of the primary key, or a configured single-column key when no primary key exists. Tables whose rules all specify `value` read only keys and update one page at a time; tables without a primary key or `tableKeys` entry retain one table-wide update. Only targeted columns appear in `SET`; row keys and untargeted columns are not assigned by the engine.
 
 For generator rules, targeted fields containing SQL `NULL` or an empty string (`""`) are preserved without calling their generator, including plugin generators. Whitespace-only strings, zero and `false` are still anonymized. Rows with no populated targeted fields are not updated, but still count toward progress. This behavior applies to both SQL Server and PostgreSQL.
 
@@ -65,7 +65,8 @@ Generators must fit the target column type, length and constraints. Values are n
 
 ## Batched updates
 
-For tables containing generator rules, set the root-level `batchSize` to choose how many rows are read and prepared at a time.
+Set the root-level `batchSize` to choose how many rows are read and prepared at a time.
+This also controls static-only updates when a primary key or `tableKeys` entry is available.
 The default is **200**; for example, use **100** for smaller batches:
 
 ```yaml
@@ -107,7 +108,7 @@ Rows with nothing to update generate no write statement.
   a later batch fails. Truncation behavior is unchanged.
 - Statement-level triggers now receive multiple rows and must handle them correctly.
   On this batch path, use `batchSize: 1` if a trigger requires one-row statements.
-  Tables with only static values always use one table-wide statement, regardless of `batchSize`.
+  Static-only tables without a primary key or `tableKeys` entry retain a table-wide statement.
 
 The reduction is in SQL commands and network round trips; actual elapsed-time gains
 depend on the database, indexes, triggers, generator cost, and network latency.
@@ -137,19 +138,41 @@ rules:
 
 See the [complete YAML example](docs/examples/static-values.yaml), which mixes static values and a generator.
 
-When **all rules for a table** specify `value`, the engine combines them into one
-parameterized statement, for example:
+When **all rules for a table** specify `value`, the engine uses keyset pagination
+if the table has a primary key (including composite keys) or a configured `tableKeys` entry:
 
-```sql
-UPDATE [dbo].[Users]
-SET [Email] = @p0, [RetryCount] = @p1, [IsActive] = @p2, [Notes] = @p3, [Phone] = @p4
+```yaml
+batchSize: 200
+rules:
+  - table: dbo.Users
+    column: Email
+    value: 'redacted@example.invalid'
 ```
 
-There is no `WHERE`, key join, or read of the original row values. Parameters are sent
-once per column, and progress is reported once when the update finishes. Schema discovery
-(including row counts) still runs. `batchSize` does not split this update. Statement-level
-triggers receive the whole table at once, and the statement can hold locks longer than a
-single chunk. Database constraints and trigger behavior still apply.
+- Each page reads only row keys, ordered by the complete key, and resumes strictly after
+  the last key of the preceding page. Primary-key column order follows database metadata.
+  There is no increasing `OFFSET` and no predicate on the values being replaced.
+- The reader closes before the update. Each statement joins exactly those keys and sends
+  each static value once per column. Memory is bounded by one page, and the effective page
+  size is capped by the provider's parameter budget.
+- Progress is reported after every successful page, including the last partial page.
+  Rows already containing the requested values are still updated once.
+- SQL Server commits each page independently; earlier pages remain committed after a later
+  failure or cancellation. PostgreSQL retains its transaction per table and rolls back the
+  current table on failure or cancellation, so its locks may remain until the table commits.
+- Use an otherwise idle database copy. Pagination keys must remain unchanged, including
+  by triggers, and a configured key should be indexed to keep page reads and joins efficient.
+  Constraints and triggers still apply; statement-level triggers now receive one page at a time.
+
+Without a primary key or `tableKeys` entry, static-only tables retain a single parameterized
+`UPDATE` of the whole table, regardless of `batchSize`, with one final progress report.
+Configure an existing unique, non-null column in `tableKeys` to enable pagination for such a table.
+Schema discovery, including row counts, still runs before the updates.
+
+Smaller pages reduce the work per update but do not eliminate lock waits or guarantee that
+every command meets its timeout. For SQL Server, `Connect Timeout` / `Connection Timeout`
+only controls connection opening. Set `Command Timeout=600` in the connection string for
+a ten-minute command limit, or `Command Timeout=0` for no command limit.
 
 If a table mixes static values with generators, all its rules keep the batch path.
 This preserves original values for generator parameters and applies fixed and generated

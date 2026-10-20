@@ -6,7 +6,7 @@ using RuleMaskDb.SqlDomain;
 
 namespace RuleMaskDb;
 
-public sealed class RelationalDriver(DatabaseType databaseType)
+public sealed partial class RelationalDriver(DatabaseType databaseType)
 {
     public DbConnection CreateConnection(string connectionString) => databaseType switch
     {
@@ -35,10 +35,20 @@ public sealed class RelationalDriver(DatabaseType databaseType)
         };
     }
 
+    /// <summary>
+    /// Caps a batch to the provider's parameter budget.
+    /// </summary>
     public int GetEffectiveBatchSize(int requestedSize, int parametersPerRow)
+        => GetEffectiveBatchSize(requestedSize, parametersPerRow, 0);
+
+    /// <summary>
+    /// Caps a batch after reserving parameters shared by all rows, such as static assignments.
+    /// </summary>
+    public int GetEffectiveBatchSize(int requestedSize, int parametersPerRow, int reservedParameters)
     {
         if (requestedSize <= 0) throw new ArgumentOutOfRangeException(nameof(requestedSize));
         if (parametersPerRow <= 0) throw new ArgumentOutOfRangeException(nameof(parametersPerRow));
+        if (reservedParameters < 0) throw new ArgumentOutOfRangeException(nameof(reservedParameters));
         // Leave room for SQL Server's command metadata below the 2,100 parameter limit.
         var limit = databaseType switch
         {
@@ -46,9 +56,9 @@ public sealed class RelationalDriver(DatabaseType databaseType)
             DatabaseType.PostgreSQL => 65535,
             _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
         };
-        if (parametersPerRow > limit)
-            throw new InvalidOperationException($"A single update row requires {parametersPerRow} parameters; the supported limit is {limit}.");
-        return Math.Min(requestedSize, limit / parametersPerRow);
+        if (reservedParameters >= limit || parametersPerRow > limit - reservedParameters)
+            throw new InvalidOperationException($"A single update row requires {parametersPerRow} parameters plus {reservedParameters} shared parameters; the supported limit is {limit}.");
+        return Math.Min(requestedSize, (limit - reservedParameters) / parametersPerRow);
     }
 
     public DbCommand CreateUpdateBatch(DbConnection connection, TableDescription table,
@@ -87,16 +97,7 @@ public sealed class RelationalDriver(DatabaseType databaseType)
             var source = $"(VALUES {string.Join(", ", tuples)}) AS s ({string.Join(", ", aliases.Select(QuoteIdentifier))})";
             var assignments = columns.Select((column, i) =>
                 $"{QuoteIdentifier(column)} = {FitColumnValue(table, column, $"s.{QuoteIdentifier($"c{keys.Count + i}")}")}");
-            var predicates = keys.Select((key, i) => $"t.{QuoteIdentifier(key)} = s.{QuoteIdentifier($"c{i}")}");
-            var set = string.Join(", ", assignments);
-            var join = string.Join(" AND ", predicates);
-            command.CommandText = databaseType switch
-            {
-                DatabaseType.PostgreSQL => $"UPDATE {QuoteTable(table)} AS t SET {set} FROM {source} WHERE {join} RETURNING s.\"row_index\"",
-                // OUTPUT INTO also supports target tables with enabled UPDATE triggers.
-                DatabaseType.SqlServer => $"DECLARE @updated TABLE ([row_index] int); UPDATE t SET {set} OUTPUT s.[row_index] INTO @updated FROM {QuoteTable(table)} AS t INNER JOIN {source} ON {join}; SELECT [row_index] FROM @updated;",
-                _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
-            };
+            command.CommandText = CreateJoinedUpdateSql(table, keys, string.Join(", ", assignments), source);
             return command;
         }
         catch
@@ -106,37 +107,17 @@ public sealed class RelationalDriver(DatabaseType databaseType)
         }
     }
 
-    public DbCommand CreateStaticUpdate(DbConnection connection, TableDescription table,
-        IReadOnlyList<string> columns, IReadOnlyList<object?> values)
+    private string CreateJoinedUpdateSql(TableDescription table, IReadOnlyList<string> keys, string assignments, string source)
     {
-        if (columns.Count == 0 || columns.Count != values.Count)
-            throw new ArgumentException("A static update requires columns and an equally sized list of values.");
-        GetEffectiveBatchSize(1, columns.Count);
-
-        var command = connection.CreateCommand();
-        try
+        var predicates = keys.Select((key, i) => $"t.{QuoteIdentifier(key)} = s.{QuoteIdentifier($"c{i}")}");
+        var join = string.Join(" AND ", predicates);
+        return databaseType switch
         {
-            var assignments = new List<string>();
-            for (var i = 0; i < columns.Count; i++)
-            {
-                var parameter = command.CreateParameter();
-                parameter.ParameterName = $"p{i}";
-                parameter.Value = values[i] ?? DBNull.Value;
-                // A direct SET assignment lets PostgreSQL infer NULL's type from the
-                // destination column, including types absent from custom metadata.
-                if (parameter.Value is DBNull && parameter is NpgsqlParameter postgresParameter)
-                    postgresParameter.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Unknown;
-                command.Parameters.Add(parameter);
-                assignments.Add($"{QuoteIdentifier(columns[i])} = {FitColumnValue(table, columns[i], "@" + parameter.ParameterName)}");
-            }
-            command.CommandText = $"UPDATE {QuoteTable(table)} SET {string.Join(", ", assignments)}";
-            return command;
-        }
-        catch
-        {
-            command.Dispose();
-            throw;
-        }
+            DatabaseType.PostgreSQL => $"UPDATE {QuoteTable(table)} AS t SET {assignments} FROM {source} WHERE {join} RETURNING s.\"row_index\"",
+            // OUTPUT INTO supports enabled UPDATE triggers and ignores their affected-row counts.
+            DatabaseType.SqlServer => $"DECLARE @updated TABLE ([row_index] int); UPDATE t SET {assignments} OUTPUT s.[row_index] INTO @updated FROM {QuoteTable(table)} AS t INNER JOIN {source} ON {join}; SELECT [row_index] FROM @updated;",
+            _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
+        };
     }
 
     private string FitColumnValue(TableDescription table, string column, string expression)
