@@ -29,7 +29,8 @@ internal sealed class StaticValueUpdater(RelationalDriver driver)
     private async Task UpdatePagesAsync(DbConnection connection, DbTransaction? transaction, int requestedBatchSize,
         TablePlan plan, IProgressReporter progressReporter, CancellationToken cancellationToken)
     {
-        var batchSize = driver.GetEffectiveBatchSize(requestedBatchSize, plan.Keys.Length, plan.Rules.Length);
+        var batchSize = driver.GetEffectiveBatchSize(requestedBatchSize, plan.Keys.Length,
+            plan.Rules.Length + (plan.Filter?.Values.Length ?? 0));
         var columns = plan.Rules.Select(rule => rule.Column).ToArray();
         var values = GetValues(plan);
         IReadOnlyList<object?>? continuationKey = null;
@@ -42,7 +43,8 @@ internal sealed class StaticValueUpdater(RelationalDriver driver)
             page = await ReadKeyPageAsync(connection, transaction, plan, batchSize, continuationKey, cancellationToken);
             if (page.IsEmpty) break;
 
-            await using var update = driver.CreateStaticUpdateBatch(connection, plan.Table, plan.Keys, columns, page.RowKeys, values);
+            await using var update = driver.CreateStaticUpdateBatch(connection, plan.Table, plan.Keys, columns,
+                page.RowKeys, values, plan.Filter);
             update.Transaction = transaction;
             await BatchUpdateExecutor.ExecuteAsync(update, plan.Table.Name, page.RowCount, cancellationToken);
 
@@ -60,7 +62,8 @@ internal sealed class StaticValueUpdater(RelationalDriver driver)
     private async Task<KeyPage> ReadKeyPageAsync(DbConnection connection, DbTransaction? transaction,
         TablePlan plan, int batchSize, IReadOnlyList<object?>? continuationKey, CancellationToken cancellationToken)
     {
-        await using var command = driver.CreateKeyPage(connection, plan.Table, plan.Keys, batchSize, continuationKey);
+        await using var command = driver.CreateKeyPage(connection, plan.Table, plan.Keys, batchSize,
+            continuationKey, plan.Filter);
         command.Transaction = transaction;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = new List<object?[]>();
@@ -75,7 +78,7 @@ internal sealed class StaticValueUpdater(RelationalDriver driver)
         TablePlan plan, IProgressReporter progressReporter, CancellationToken cancellationToken)
     {
         await using var update = driver.CreateStaticUpdate(connection, plan.Table,
-            plan.Rules.Select(rule => rule.Column).ToArray(), GetValues(plan));
+            plan.Rules.Select(rule => rule.Column).ToArray(), GetValues(plan), plan.Filter);
         update.Transaction = transaction;
         await update.ExecuteNonQueryAsync(cancellationToken);
 

@@ -25,7 +25,8 @@ internal sealed class GeneratedValueUpdater(RelationalDriver driver, TablePlan p
         await using var select = CreateSourceQuery(readerConnection, sourceColumns);
         await using var reader = await select.ExecuteReaderAsync(cancellationToken);
         var columnTypes = GetUpdateColumnTypes(reader);
-        var batchSize = driver.GetEffectiveBatchSize(script.BatchSize, plan.Keys.Length + plan.Rules.Length);
+        var batchSize = driver.GetEffectiveBatchSize(script.BatchSize, plan.Keys.Length + plan.Rules.Length,
+            plan.Filter?.Values.Length ?? 0);
         var processedRowCount = 0;
 
         await foreach (var batch in ReadPreparedBatchesAsync(reader, sourceColumns, batchSize, cancellationToken))
@@ -48,8 +49,10 @@ internal sealed class GeneratedValueUpdater(RelationalDriver driver, TablePlan p
 
     private DbCommand CreateSourceQuery(DbConnection connection, IReadOnlyList<string> sourceColumns)
     {
-        var query = $"SELECT {string.Join(", ", sourceColumns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(plan.Table)}";
         var command = connection.CreateCommand();
+        var query = $"SELECT {string.Join(", ", sourceColumns.Select(driver.QuoteIdentifier))} FROM {driver.QuoteTable(plan.Table)}";
+        if (plan.Filter is not null)
+            query += " WHERE " + driver.CreateTableFilterPredicate(command, plan.Filter);
         command.CommandText = query;
         return command;
     }
@@ -125,7 +128,7 @@ internal sealed class GeneratedValueUpdater(RelationalDriver driver, TablePlan p
                 .Concat(group.ChangedRuleIndices.Select(index => columnTypes[plan.Keys.Length + index])).ToArray();
 
             await using var update = driver.CreateUpdateBatch(connection, plan.Table, plan.Keys,
-                changedColumns, group.Rows, changedColumnTypes);
+                changedColumns, group.Rows, changedColumnTypes, plan.Filter);
             update.Transaction = transaction;
             await BatchUpdateExecutor.ExecuteAsync(update, plan.Table.Name, group.RowCount, cancellationToken);
         }

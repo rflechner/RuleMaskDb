@@ -1,0 +1,23 @@
+# Apply anonymization only to selected EF Core TPH discriminator values.
+# Use exact schema/table/column names from `describe`.
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true;TrustServerCertificate=true;'
+
+# Optional per-table row filters. Omit `tables` to anonymize all rows as before.
+tables:
+  - name: dbo.Customers
+    filter:
+      column: Discriminator
+      values:
+        - IndividualCustomer
+        - BusinessCustomer
+
+# Existing flat rule configuration remains unchanged.
+rules:
+  - table: dbo.Customers
+    column: Name
+    generator: Name
+  - table: dbo.Customers
+    column: Email
+    generator: Email

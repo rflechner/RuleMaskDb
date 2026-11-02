@@ -54,6 +54,8 @@ internal sealed class TablePreparationExecutor(RelationalDriver driver)
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"SELECT COUNT(*) FROM {driver.QuoteTable(plan.Table)}";
+        if (plan.Filter is not null)
+            command.CommandText += " WHERE " + driver.CreateTableFilterPredicate(command, plan.Filter);
         return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
     }
 }

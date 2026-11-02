@@ -53,16 +53,33 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         foreach (var (table, column) in tableKeys)
             if (string.IsNullOrWhiteSpace(table) || string.IsNullOrWhiteSpace(column))
                 throw new InvalidOperationException("tableKeys requires non-empty table and column names.");
+        var tableFilters = ImmutableDictionary.CreateBuilder<string, TableFilter>(StringComparer.Ordinal);
+        foreach (var table in doc.Tables ?? [])
+        {
+            if (table is null || string.IsNullOrWhiteSpace(table.Name))
+                throw new InvalidOperationException("tables requires non-empty table names.");
+            if (table.Filter is null)
+                throw new InvalidOperationException($"Missing filter for table: {table.Name}");
+
+            var filter = new TableFilter(table.Filter.Column ?? string.Empty,
+                (table.Filter.Values ?? []).ToImmutableArray());
+            filter.Validate(table.Name);
+            if (!tableFilters.TryAdd(table.Name, filter))
+                throw new InvalidOperationException($"Duplicate tables entry: {table.Name}");
+        }
+
         var script = new ScriptSpecification(database, rules)
         {
             BatchSize = doc.BatchSize,
             TableKeys = tableKeys,
+            TableFilters = tableFilters.ToImmutable(),
             BeforeTableSql = (doc.BeforeTableSql ?? new Dictionary<string, string>())
                 .ToImmutableDictionary(StringComparer.Ordinal),
             TruncateTables = (doc.TruncateTables ?? []).ToImmutableArray()
         };
         script.ValidateBatchSize();
         script.ValidateBeforeTableSql();
+        script.ValidateTableFilters();
         return script;
     }
 
@@ -91,9 +108,22 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         public int BatchSize { get; set; } = 200;
         public YamlDatabase? Database { get; set; }
         public List<YamlRule>? Rules { get; set; }
+        public List<YamlTable>? Tables { get; set; }
         public List<string>? TruncateTables { get; set; }
         public Dictionary<string, string>? TableKeys { get; set; }
         public Dictionary<string, string>? BeforeTableSql { get; set; }
+    }
+
+    private sealed class YamlTable
+    {
+        public string? Name { get; set; }
+        public YamlTableFilter? Filter { get; set; }
+    }
+
+    private sealed class YamlTableFilter
+    {
+        public string? Column { get; set; }
+        public List<object?>? Values { get; set; }
     }
 
     private sealed class YamlDatabase

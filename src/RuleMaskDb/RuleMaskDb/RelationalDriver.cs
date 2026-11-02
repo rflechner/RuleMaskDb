@@ -22,6 +22,16 @@ public sealed partial class RelationalDriver(DatabaseType databaseType)
         _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
     };
 
+    /// <summary>
+    /// Appends parameterized filter values and returns a quoted, optionally qualified SQL predicate.
+    /// </summary>
+    internal string CreateTableFilterPredicate(DbCommand command, TableFilter filter, string? alias = null)
+    {
+        var column = (alias is null ? string.Empty : alias + ".") + QuoteIdentifier(filter.Column);
+        var values = filter.Values.Select((value, index) => AddParameter(command, $"filter{index}", value));
+        return $"{column} IN ({string.Join(", ", values)})";
+    }
+
     public string[] CreateTruncateCommands(IReadOnlyList<TableDescription> tables)
     {
         if (tables.Count == 0) return [];
@@ -63,13 +73,13 @@ public sealed partial class RelationalDriver(DatabaseType databaseType)
 
     public DbCommand CreateUpdateBatch(DbConnection connection, TableDescription table,
         IReadOnlyList<string> keys, IReadOnlyList<string> columns,
-        IReadOnlyList<object?[]> rows, IReadOnlyList<string> dataTypeNames)
+        IReadOnlyList<object?[]> rows, IReadOnlyList<string> dataTypeNames, TableFilter? filter = null)
     {
         var width = keys.Count + columns.Count;
         if (keys.Count == 0 || columns.Count == 0 || rows.Count == 0
             || dataTypeNames.Count != width || rows.Any(r => r.Length != width))
             throw new ArgumentException("An update batch requires keys, columns, and equally sized rows and type metadata.");
-        if (GetEffectiveBatchSize(rows.Count, width) != rows.Count)
+        if (GetEffectiveBatchSize(rows.Count, width, filter?.Values.Length ?? 0) != rows.Count)
             throw new ArgumentException("Update batch exceeds the parameter budget.");
 
         var command = connection.CreateCommand();
@@ -97,7 +107,7 @@ public sealed partial class RelationalDriver(DatabaseType databaseType)
             var source = $"(VALUES {string.Join(", ", tuples)}) AS s ({string.Join(", ", aliases.Select(QuoteIdentifier))})";
             var assignments = columns.Select((column, i) =>
                 $"{QuoteIdentifier(column)} = {FitColumnValue(table, column, $"s.{QuoteIdentifier($"c{keys.Count + i}")}")}");
-            command.CommandText = CreateJoinedUpdateSql(table, keys, string.Join(", ", assignments), source);
+            command.CommandText = CreateJoinedUpdateSql(table, keys, string.Join(", ", assignments), source, command, filter);
             return command;
         }
         catch
@@ -107,15 +117,17 @@ public sealed partial class RelationalDriver(DatabaseType databaseType)
         }
     }
 
-    private string CreateJoinedUpdateSql(TableDescription table, IReadOnlyList<string> keys, string assignments, string source)
+    private string CreateJoinedUpdateSql(TableDescription table, IReadOnlyList<string> keys, string assignments,
+        string source, DbCommand command, TableFilter? filter)
     {
         var predicates = keys.Select((key, i) => $"t.{QuoteIdentifier(key)} = s.{QuoteIdentifier($"c{i}")}");
         var join = string.Join(" AND ", predicates);
+        var filterPredicate = filter is null ? string.Empty : " AND " + CreateTableFilterPredicate(command, filter, "t");
         return databaseType switch
         {
-            DatabaseType.PostgreSQL => $"UPDATE {QuoteTable(table)} AS t SET {assignments} FROM {source} WHERE {join} RETURNING s.\"row_index\"",
+            DatabaseType.PostgreSQL => $"UPDATE {QuoteTable(table)} AS t SET {assignments} FROM {source} WHERE {join}{filterPredicate} RETURNING s.\"row_index\"",
             // OUTPUT INTO supports enabled UPDATE triggers and ignores their affected-row counts.
-            DatabaseType.SqlServer => $"DECLARE @updated TABLE ([row_index] int); UPDATE t SET {assignments} OUTPUT s.[row_index] INTO @updated FROM {QuoteTable(table)} AS t INNER JOIN {source} ON {join}; SELECT [row_index] FROM @updated;",
+            DatabaseType.SqlServer => $"DECLARE @updated TABLE ([row_index] int); UPDATE t SET {assignments} OUTPUT s.[row_index] INTO @updated FROM {QuoteTable(table)} AS t INNER JOIN {source} ON {join}{filterPredicate}; SELECT [row_index] FROM @updated;",
             _ => throw new NotSupportedException($"Unsupported database type: {databaseType}")
         };
     }

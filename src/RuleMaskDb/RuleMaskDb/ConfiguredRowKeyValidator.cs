@@ -24,8 +24,9 @@ internal sealed class ConfiguredRowKeyValidator(RelationalDriver driver)
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         // GROUP BY uses the same database equality semantics as the update joins.
+        var where = plan.Filter is null ? string.Empty : " WHERE " + driver.CreateTableFilterPredicate(command, plan.Filter);
         command.CommandText = $"""
-            SELECT {column} FROM {driver.QuoteTable(plan.Table)}
+            SELECT {column} FROM {driver.QuoteTable(plan.Table)}{where}
             GROUP BY {column} HAVING {column} IS NULL OR COUNT(*) > 1
             """;
 
