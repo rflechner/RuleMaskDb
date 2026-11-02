@@ -83,6 +83,68 @@ Durations use `hours:minutes:seconds.milliseconds`; hours can exceed 24.
 Library callers receive the same immutable `ScriptExecutionReport` from
 `IScriptRunner.RunAsync`.
 
+## Filtering rows by a discriminator
+
+Use an optional `tables` entry to anonymize only rows whose discriminator (or
+another scalar column) matches one of the listed `filter.values`. This is useful
+for Entity Framework Core table-per-hierarchy (TPH) tables that contain multiple
+entity types. Existing top-level `rules` are unchanged.
+
+```yaml
+database:
+  type: SqlServer
+  connectionString: 'Server=localhost;Database=MaskedCopy;Integrated Security=true'
+
+tables:
+  - name: dbo.Customers
+    filter:
+      column: Discriminator
+      values:
+        - IndividualCustomer
+        - BusinessCustomer
+
+rules:
+  - table: dbo.Customers
+    column: Name
+    generator: Name
+  - table: dbo.Customers
+    column: Email
+    generator: Email
+```
+
+See [the complete YAML example](docs/examples/table-filters.yaml).
+The filter above is equivalent to `WHERE [Discriminator] IN (@filter0, @filter1)`
+on SQL Server; on PostgreSQL it uses double-quoted identifiers and the same
+parameter placeholders. Values are **SQL parameters**, never interpolated into
+the query, and table/column identifiers are escaped by the selected provider.
+Use exact names from `describe` (for example, `public.customers` on PostgreSQL).
+
+- Filtering happens **during the initial row SELECT or static-key pagination**, before
+  any values are generated. The predicate is **also applied to every UPDATE**,
+  including batched generator/mixed updates, static key-page updates and the
+  single table-wide update used for keyless static-only tables. Excluded rows
+  are never assigned by RuleMaskDb.
+- Progress totals count only the rows matching the filter. A filtered table
+  with no matches performs no generated or keyed updates; a keyless static
+  update still executes a harmless `UPDATE ... WHERE` matching no rows.
+- `filter.column` must exist, and must not itself be an anonymization target.
+  `filter.values` must be a non-empty sequence of non-null scalar values
+  (text, number or boolean). Quote numbers/booleans when the database
+  discriminator is text. Missing columns, duplicate table entries, invalid
+  values and filters without corresponding rules fail before any data writes.
+- Only listed table names are filtered; other tables behave exactly as before.
+  Filters may coexist with `tableKeys`, including on keyless tables. Configured
+  keys are validated for uniqueness and non-nullness **within the selected rows**;
+  the UPDATE predicate also protects excluded rows that reuse a key.
+- `beforeTableSql` runs *before* the filter is evaluated and may affect any
+  row in the table. It remains intentionally unfiltered; the selected-row
+  count is refreshed after preparation. Global `truncateTables` is likewise
+  separate and cannot be restricted to selected rows.
+- This is currently a single-column `IN` filter, not arbitrary SQL. For
+  multiple discriminator values, specify them as one `values` list.
+  As with unfiltered runs, execute against an otherwise idle database copy
+  to avoid concurrent modifications changing row selection.
+
 ## Batched updates
 
 Set the root-level `batchSize` to choose how many rows are read and prepared at a time.
