@@ -34,6 +34,11 @@ public record TablePlan(TableDescription Table, Rule[] Rules, string[] Keys, IDa
     public string? ConfiguredRowKey { get; init; }
 
     /// <summary>
+    /// Restricts reads and writes to rows whose filter column matches one of the values.
+    /// </summary>
+    public TableFilter? Filter { get; init; }
+
+    /// <summary>
     /// Gets the validated SQL to execute before anonymization, or null when none was supplied.
     /// </summary>
     public string? PreparationSql { get; init; }

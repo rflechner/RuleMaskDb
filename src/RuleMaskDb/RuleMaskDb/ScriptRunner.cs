@@ -25,6 +25,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         script.ValidateBatchSize();
         script.ValidateTablesKeys();
         script.ValidateBeforeTableSql();
+        script.ValidateTableFilters();
 
         var database = await databaseAnalyzer.DescribeDatabaseAsync(script.Database);
         var driver = new RelationalDriver(script.Database.DatabaseType);
@@ -48,7 +49,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
         IProgressReporter progressReporter, TablePlan plan, RelationalDriver driver, CancellationToken cancellationToken)
     {
         var startedAt = clock.GetTimestamp();
-        var preparedPlan = script.BeforeTableSql.IsEmpty
+        var preparedPlan = script.BeforeTableSql.IsEmpty && plan.Filter is null
             ? plan
             : await new TablePreparationExecutor(driver).PrepareAsync(
                 script.Database.ConnectionString, plan, cancellationToken);
@@ -145,13 +146,25 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
                 if (keys.Contains(field.Path))
                     throw new InvalidOperationException($"Cannot anonymize configured row key: {table.Name}.{field.Path}");
             }
+            var filter = script.TableFilters.GetValueOrDefault(table.Name);
+            if (filter is not null)
+            {
+                if (!table.Fields.Any(field => field.Path == filter.Column))
+                    throw new InvalidOperationException($"Unknown filter column: {table.Name}.{filter.Column}");
+                if (rules.Any(rule => rule.Column == filter.Column))
+                    throw new InvalidOperationException($"Cannot anonymize filter column: {table.Name}.{filter.Column}");
+            }
+
             var staticOnly = rules.All(r => r.HasValue);
             if (!staticOnly && keys.Length == 0)
                 throw new InvalidOperationException($"Table has no primary key: {table.Name}. Configure a unique, non-null column in tableKeys.");
+            var filterParameterCount = filter?.Values.Length ?? 0;
             if (staticOnly && keys.Length > 0)
-                driver.GetEffectiveBatchSize(script.BatchSize, keys.Length, rules.Length);
+                driver.GetEffectiveBatchSize(script.BatchSize, keys.Length, rules.Length + filterParameterCount);
+            else if (staticOnly)
+                driver.GetEffectiveBatchSize(1, rules.Length, filterParameterCount);
             else
-                driver.GetEffectiveBatchSize(script.BatchSize, rules.Length + keys.Length);
+                driver.GetEffectiveBatchSize(script.BatchSize, rules.Length + keys.Length, filterParameterCount);
             var generators = rules.Select(r => r.HasValue ? null : dataGeneratorFactory.Create(r.Generator ?? nameof(GeneratorType.Name))).ToArray();
             for (var i = 0; i < rules.Length; i++)
                 if (generators[i] is { } generator)
@@ -159,6 +172,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             plans.Add(new TablePlan(table, rules, keys, generators)
             {
                 ConfiguredRowKey = configuredKey,
+                Filter = filter,
                 PreparationSql = script.BeforeTableSql.GetValueOrDefault(table.Name)
             });
         }

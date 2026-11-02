@@ -67,6 +67,29 @@ public record ScriptSpecification(DatabaseSpecification Database, ImmutableArray
         }
     }
 
+    /// <summary>
+    /// Restricts anonymization of individual tables to rows matching configured values.
+    /// </summary>
+    public ImmutableDictionary<string, TableFilter> TableFilters { get; init; }
+        = ImmutableDictionary<string, TableFilter>.Empty;
+
+    /// <summary>
+    /// Validates filters before connecting to or modifying the target database.
+    /// </summary>
+    public void ValidateTableFilters()
+    {
+        foreach (var (table, filter) in TableFilters)
+        {
+            if (string.IsNullOrWhiteSpace(table) || !Rules.Any(rule => rule.Table == table))
+                throw new InvalidOperationException($"Table filter has no matching anonymization rule: {table}");
+
+            if (filter is null)
+                throw new InvalidOperationException($"Table filter is missing for {table}.");
+
+            filter.Validate(table);
+        }
+    }
+
     public ImmutableDictionary<string, string> TableKeys { get; init; }
         = ImmutableDictionary<string, string>.Empty;
 }

@@ -12,7 +12,7 @@ public sealed partial class RelationalDriver
     /// Keys must be unique, non-null, orderable, and unchanged throughout execution.
     /// </summary>
     public DbCommand CreateKeyPage(DbConnection connection, TableDescription table,
-        IReadOnlyList<string> keys, int batchSize, IReadOnlyList<object?>? lastKey)
+        IReadOnlyList<string> keys, int batchSize, IReadOnlyList<object?>? lastKey, TableFilter? filter = null)
     {
         if (keys.Count == 0 || (lastKey is not null && lastKey.Count != keys.Count))
             throw new ArgumentException("A key page requires keys and a matching continuation key.");
@@ -23,8 +23,12 @@ public sealed partial class RelationalDriver
         {
             AddParameter(command, "pageSize", batchSize);
             var columns = string.Join(", ", keys.Select(QuoteIdentifier));
-            var filter = lastKey is null ? "" : " WHERE " + CreateKeyContinuation(command, keys, lastKey);
-            var source = $"FROM {QuoteTable(table)}{filter} ORDER BY {columns}";
+            var continuation = lastKey is null ? null : CreateKeyContinuation(command, keys, lastKey);
+            var predicate = filter is null ? null : CreateTableFilterPredicate(command, filter);
+            var where = predicate is null
+                ? (continuation is null ? "" : " WHERE " + continuation)
+                : " WHERE " + predicate + (continuation is null ? "" : " AND (" + continuation + ")");
+            var source = $"FROM {QuoteTable(table)}{where} ORDER BY {columns}";
             command.CommandText = databaseType switch
             {
                 DatabaseType.SqlServer => $"SELECT TOP (@pageSize) {columns} {source}",
@@ -63,13 +67,15 @@ public sealed partial class RelationalDriver
     /// Creates a table-wide static update for tables without a reliable pagination key.
     /// </summary>
     public DbCommand CreateStaticUpdate(DbConnection connection, TableDescription table,
-        IReadOnlyList<string> columns, IReadOnlyList<object?> values)
+        IReadOnlyList<string> columns, IReadOnlyList<object?> values, TableFilter? filter = null)
     {
         var command = connection.CreateCommand();
         try
         {
             var assignments = AddStaticAssignments(command, table, columns, values);
-            command.CommandText = $"UPDATE {QuoteTable(table)} SET {assignments}";
+            GetEffectiveBatchSize(1, columns.Count, filter?.Values.Length ?? 0);
+            var where = filter is null ? string.Empty : " WHERE " + CreateTableFilterPredicate(command, filter);
+            command.CommandText = $"UPDATE {QuoteTable(table)} SET {assignments}{where}";
             return command;
         }
         catch
@@ -85,11 +91,11 @@ public sealed partial class RelationalDriver
     /// </summary>
     public DbCommand CreateStaticUpdateBatch(DbConnection connection, TableDescription table,
         IReadOnlyList<string> keys, IReadOnlyList<string> columns,
-        IReadOnlyList<object?[]> rows, IReadOnlyList<object?> values)
+        IReadOnlyList<object?[]> rows, IReadOnlyList<object?> values, TableFilter? filter = null)
     {
         if (keys.Count == 0 || rows.Count == 0 || rows.Any(row => row.Length != keys.Count || row.Any(v => v is null or DBNull)))
             throw new ArgumentException("A static update batch requires non-null row keys of matching width.");
-        if (GetEffectiveBatchSize(rows.Count, keys.Count, columns.Count) != rows.Count)
+        if (GetEffectiveBatchSize(rows.Count, keys.Count, columns.Count + (filter?.Values.Length ?? 0)) != rows.Count)
             throw new ArgumentException("Static update batch exceeds the parameter budget.");
 
         var command = connection.CreateCommand();
@@ -97,7 +103,7 @@ public sealed partial class RelationalDriver
         {
             var assignments = AddStaticAssignments(command, table, columns, values);
             var source = CreateStaticKeySource(command, keys.Count, rows);
-            command.CommandText = CreateJoinedUpdateSql(table, keys, assignments, source);
+            command.CommandText = CreateJoinedUpdateSql(table, keys, assignments, source, command, filter);
             return command;
         }
         catch
