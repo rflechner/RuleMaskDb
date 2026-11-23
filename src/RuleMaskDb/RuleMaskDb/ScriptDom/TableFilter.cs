@@ -10,6 +10,9 @@ namespace RuleMaskDb.ScriptDom;
 /// <param name="Values">Non-null scalar values accepted by an SQL IN predicate.</param>
 public sealed record TableFilter(string Column, ImmutableArray<object?> Values)
 {
+    /// <summary>Optional relationship used to read the discriminator from another table.</summary>
+    public FilterJoin? Join { get; init; }
+
     /// <summary>
     /// Validates the filter before any database operations are performed.
     /// </summary>
@@ -17,6 +20,9 @@ public sealed record TableFilter(string Column, ImmutableArray<object?> Values)
     {
         if (string.IsNullOrWhiteSpace(Column))
             throw new InvalidOperationException($"Table filter column must not be empty: {tableName}");
+        if (Join is { } join && (string.IsNullOrWhiteSpace(join.Table)
+            || string.IsNullOrWhiteSpace(join.LocalColumn) || string.IsNullOrWhiteSpace(join.RemoteColumn)))
+            throw new InvalidOperationException($"Filter join requires table, localColumn and remoteColumn: {tableName}");
         if (Values.IsDefaultOrEmpty)
             throw new InvalidOperationException($"Table filter values must not be empty: {tableName}.{Column}");
         if (Values.Any(value => value is not (string or bool or byte or sbyte or short or ushort or int
@@ -25,4 +31,10 @@ public sealed record TableFilter(string Column, ImmutableArray<object?> Values)
         if (Values.Any(value => value is double d && !double.IsFinite(d) || value is float f && !float.IsFinite(f)))
             throw new InvalidOperationException($"Table filter values must be finite: {tableName}.{Column}");
     }
+}
+
+/// <summary>Looks up a discriminator by matching the target's local column to the related table's remote column.</summary>
+public sealed record FilterJoin(string Table, string LocalColumn, string RemoteColumn)
+{
+    internal SqlDomain.TableDescription? ResolvedTable { get; init; }
 }

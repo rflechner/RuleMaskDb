@@ -150,6 +150,45 @@ public class TableFilterIntegrationTests(DatabaseType databaseType)
         }));
     }
 
+    [Test]
+    public async Task Joined_filter_preserves_public_rows_and_masks_unknown_discriminators()
+    {
+        var companies = tableName + "_companies";
+        var quotedCompanies = driver.QuoteTable(new SqlDomain.TableDescription(companies, 0, []));
+        var flagType = databaseType == DatabaseType.SqlServer ? "bit" : "boolean";
+        var flags = databaseType == DatabaseType.SqlServer ? "(1, 1), (2, 0)" : "(1, TRUE), (2, FALSE)";
+        try
+        {
+            await ExecuteAsync($"""
+                CREATE TABLE {quotedCompanies} (id int PRIMARY KEY, is_public {flagType});
+                INSERT INTO {quotedCompanies} VALUES {flags}, (3, NULL);
+                ALTER TABLE {quotedTable} ADD company_id int;
+                """);
+            await ExecuteAsync($"UPDATE {quotedTable} SET company_id = id WHERE id < 5");
+            var filter = new TableFilter("is_public", [false])
+            {
+                Join = new(companies, "company_id", "id")
+            };
+            var script = CreateScript([new(tableName, "name", null, "Name")]) with
+            {
+                TableFilters = ImmutableDictionary<string, TableFilter>.Empty.Add(tableName, filter)
+            };
+            var progress = new RecordingProgress();
+            await RunAsync(script, progress);
+
+            Assert.That(await ReadRowsAsync(), Is.EqualTo(new[]
+            {
+                "1|Person|Alice|keep", "2|Company|masked|keep", "3|Partner|masked|keep",
+                "4|Person|masked|keep", "5|Company|masked|keep"
+            }));
+            Assert.That(progress.Updates.Last(), Is.EqualTo((4, 4)));
+        }
+        finally
+        {
+            await ExecuteAsync($"DROP TABLE IF EXISTS {quotedCompanies}");
+        }
+    }
+
     private ScriptSpecification CreateScript(ImmutableArray<Rule> rules) =>
         new(new(databaseType, connectionString), rules)
         {

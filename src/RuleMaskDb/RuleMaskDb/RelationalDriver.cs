@@ -29,7 +29,17 @@ public sealed partial class RelationalDriver(DatabaseType databaseType)
     {
         var column = (alias is null ? string.Empty : alias + ".") + QuoteIdentifier(filter.Column);
         var values = filter.Values.Select((value, index) => AddParameter(command, $"filter{index}", value));
-        return $"{column} IN ({string.Join(", ", values)})";
+        var parameters = string.Join(", ", values);
+        if (filter.Join is not { } join)
+            return $"{column} IN ({parameters})";
+
+        var localKey = (alias is null ? string.Empty : alias + ".") + QuoteIdentifier(join.LocalColumn);
+        var relatedTable = QuoteTable(join.ResolvedTable ?? new TableDescription(join.Table, 0, []));
+        var remoteKey = QuoteIdentifier(join.RemoteColumn);
+        // Exclude only keys with a known discriminator outside the configured list.
+        // Removing null remote keys prevents NOT IN from dropping unrelated rows.
+        return $"({localKey} IS NULL OR {localKey} NOT IN (SELECT {remoteKey} FROM {relatedTable} " +
+            $"WHERE {remoteKey} IS NOT NULL AND {QuoteIdentifier(filter.Column)} NOT IN ({parameters})))";
     }
 
     public string[] CreateTruncateCommands(IReadOnlyList<TableDescription> tables)

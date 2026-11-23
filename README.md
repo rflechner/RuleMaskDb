@@ -145,6 +145,32 @@ Use exact names from `describe` (for example, `public.customers` on PostgreSQL).
   As with unfiltered runs, execute against an otherwise idle database copy
   to avoid concurrent modifications changing row selection.
 
+### Discriminator in a related table
+
+To mask addresses according to their company's visibility, configure a single
+equality join. Use exact names from `describe`.
+
+```yaml
+tables:
+  - name: dbo.Address
+    filter:
+      join:
+        table: dbo.Company
+        localColumn: CompanyId
+        remoteColumn: Id
+      column: IsPublic
+      values: [false]
+rules:
+  - table: dbo.Address
+    column: Street
+    value: redacted
+```
+
+A public company keeps its address. A private company, a null discriminator,
+a missing company or a null CompanyId allows anonymization. If several related
+rows match, any known value outside the list preserves the address. The join
+columns and related discriminator must remain stable throughout the run.
+
 ## Batched updates
 
 Set the root-level `batchSize` to choose how many rows are read and prepared at a time.
