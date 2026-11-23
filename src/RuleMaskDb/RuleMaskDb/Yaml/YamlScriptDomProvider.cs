@@ -62,7 +62,12 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
                 throw new InvalidOperationException($"Missing filter for table: {table.Name}");
 
             var filter = new TableFilter(table.Filter.Column ?? string.Empty,
-                (table.Filter.Values ?? []).ToImmutableArray());
+                (table.Filter.Values ?? []).ToImmutableArray())
+            {
+                Join = table.Filter.Join is { } join
+                    ? new FilterJoin(join.Table ?? "", join.LocalColumn ?? "", join.RemoteColumn ?? "")
+                    : null
+            };
             filter.Validate(table.Name);
             if (!tableFilters.TryAdd(table.Name, filter))
                 throw new InvalidOperationException($"Duplicate tables entry: {table.Name}");
@@ -120,9 +125,17 @@ public class YamlScriptDomProvider(string filePath) : IScriptDomProvider
         public YamlTableFilter? Filter { get; set; }
     }
 
+    private sealed class YamlFilterJoin
+    {
+        public string? Table { get; set; }
+        public string? LocalColumn { get; set; }
+        public string? RemoteColumn { get; set; }
+    }
+
     private sealed class YamlTableFilter
     {
         public string? Column { get; set; }
+        public YamlFilterJoin? Join { get; set; }
         public List<object?>? Values { get; set; }
     }
 

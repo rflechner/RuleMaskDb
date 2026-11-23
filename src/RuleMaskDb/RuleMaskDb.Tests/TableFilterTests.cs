@@ -40,6 +40,33 @@ public class TableFilterTests
             Is.EqualTo(new object?[] { "IndividualCustomer", "BusinessCustomer" }));
     }
 
+    [TestCase(DatabaseType.SqlServer)]
+    [TestCase(DatabaseType.PostgreSQL)]
+    public async Task Joined_yaml_filter_builds_a_parameterized_related_key_exclusion(DatabaseType type)
+    {
+        const string yaml = """
+            tables:
+              - name: Address
+                filter:
+                  join: {table: Company, localColumn: CompanyId, remoteColumn: Id}
+                  column: IsPublic
+                  values: [false]
+            rules:
+              - {table: Address, column: Street, value: hidden}
+            """;
+        var filter = (await ParseYamlAsync(yaml)).TableFilters["Address"];
+        var driver = new RelationalDriver(type);
+        using var connection = driver.CreateConnection("");
+        using var command = driver.CreateStaticUpdate(connection, new TableDescription("Address", 1, []),
+            ["Street"], ["hidden"], filter);
+        string Q(string name) => driver.QuoteIdentifier(name);
+        Assert.That(command.CommandText, Does.Contain(
+            $"({Q("CompanyId")} IS NULL OR {Q("CompanyId")} NOT IN (SELECT {Q("Id")} FROM {Q("Company")} " +
+            $"WHERE {Q("Id")} IS NOT NULL AND {Q("IsPublic")} NOT IN (@filter0)))"));
+        Assert.That(command.Parameters["filter0"].Value, Is.EqualTo(false));
+        AssertSqlServerParses(type, command.CommandText);
+    }
+
     [Test]
     public async Task Yaml_without_tables_preserves_unfiltered_behavior()
     {

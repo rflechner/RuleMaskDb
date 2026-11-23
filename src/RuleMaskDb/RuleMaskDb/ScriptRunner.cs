@@ -103,6 +103,34 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             await progressReporter.ReportProgressAsync(table.Name, 1, 1, cancellationToken);
     }
 
+    private static TableFilter ResolveFilter(ScriptSpecification script, DatabaseDescription database,
+        TableDescription target, TableFilter filter)
+    {
+        void ValidateColumn(TableDescription table, string column)
+        {
+            if (!table.Fields.Any(field => field.Path == column))
+                throw new InvalidOperationException($"Unknown filter column: {table.Name}.{column}");
+            if (script.Rules.Any(rule => rule.Table == table.Name && rule.Column == column))
+                throw new InvalidOperationException($"Cannot anonymize filter column: {table.Name}.{column}");
+        }
+
+        if (filter.Join is not { } join)
+        {
+            ValidateColumn(target, filter.Column);
+            return filter;
+        }
+
+        var matches = database.Tables.Where(table => table.Name == join.Table).ToArray();
+        if (matches.Length != 1)
+            throw new InvalidOperationException($"Filter join table is missing or ambiguous: {join.Table}");
+
+        var related = matches[0];
+        ValidateColumn(target, join.LocalColumn);
+        ValidateColumn(related, join.RemoteColumn);
+        ValidateColumn(related, filter.Column);
+        return filter with { Join = join with { ResolvedTable = related } };
+    }
+
     /// <summary>
     /// Loads and validates the table plans based on the given script specification, database description,
     /// and relational driver. Validates all target rules and configured keys before processing any table updates.
@@ -148,12 +176,7 @@ public class ScriptRunner(IDatabaseAnalyzer databaseAnalyzer, IDataGeneratorFact
             }
             var filter = script.TableFilters.GetValueOrDefault(table.Name);
             if (filter is not null)
-            {
-                if (!table.Fields.Any(field => field.Path == filter.Column))
-                    throw new InvalidOperationException($"Unknown filter column: {table.Name}.{filter.Column}");
-                if (rules.Any(rule => rule.Column == filter.Column))
-                    throw new InvalidOperationException($"Cannot anonymize filter column: {table.Name}.{filter.Column}");
-            }
+                filter = ResolveFilter(script, database, table, filter);
 
             var staticOnly = rules.All(r => r.HasValue);
             if (!staticOnly && keys.Length == 0)
