@@ -4,6 +4,29 @@ RuleMaskDb replaces configured sensitive fields directly in a target database us
 
 ![RuleMaskDb](docs/images/logo-complex-1.png)
 
+## Install
+
+Requires .NET 10. Packages are published to the [GitHub Packages feed](https://nuget.pkg.github.com/rflechner/index.json). First [configure feed authentication](docs/packaging.md#install-from-github-packages), then install the CLI:
+
+```sh
+dotnet tool install --global RuleMaskDb.Tool --add-source https://nuget.pkg.github.com/rflechner/index.json
+rulemaskdb --help
+rulemaskdb generators
+rulemaskdb run --script rules.yaml
+```
+
+Update it with `dotnet tool update --global RuleMaskDb.Tool --add-source https://nuget.pkg.github.com/rflechner/index.json`. You can also install it as a local tool with `dotnet new tool-manifest` followed by `dotnet tool install RuleMaskDb.Tool --add-source https://nuget.pkg.github.com/rflechner/index.json` and run it with `dotnet tool run rulemaskdb -- --help`.
+
+For custom generator plugins, reference the standalone SDK from your .NET 10 class library:
+
+```sh
+dotnet add package RuleMaskDb.Sdk --source https://nuget.pkg.github.com/rflechner/index.json
+```
+
+Set `RULEMASK_PLUGINS_DIRECTORY` to an external plugin directory when using the installed tool; this keeps plugins independent of the tool's version-specific installation directory. See [Generator plugins](#generator-plugins) for the plugin contract and discovery rules.
+
+See [packaging and releases](docs/packaging.md) for local packaging, CI artifacts, and GitHub Packages publishing.
+
 ## In-place anonymization
 
 Use a non-production copy. RuleMaskDb does not clone the database. Only configured columns are covered; review the resulting data for your privacy requirements.
